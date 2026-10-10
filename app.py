@@ -226,7 +226,7 @@ def fmt_m(val):
   return f"R$ {val:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
 
-# --- MOTOR DE GERAÇÃO DO PDF REPORTLAB (PÁGINA ÚNICA BEM DISTRIBUÍDA) ---
+# --- MOTOR DE GERAÇÃO DO PDF REPORTLAB ---
 def gerar_pdf_bytes(dados):
   buffer = io.BytesIO()
   doc = SimpleDocTemplate(
@@ -496,7 +496,7 @@ def gerar_pdf_bytes(dados):
   story.append(val_table)
   story.append(Spacer(1, 8.0))
 
-  # 01 - ITENS NÃO INCLUSOS NESTE ORÇAMENTO (TEXTO INTEGRAL)
+  # 01 - ITENS NÃO INCLUSOS NESTE ORÇAMENTO
   story.append(
       Paragraph("01 - ITENS NÃO INCLUSOS NESTE ORÇAMENTO", section_heading)
   )
@@ -537,7 +537,7 @@ def gerar_pdf_bytes(dados):
   story.append(no_inc_box)
   story.append(Spacer(1, 7.0))
 
-  # 02 - CONDIÇÕES DE PAGAMENTO (TEXTO INTEGRAL)
+  # 02 - CONDIÇÕES DE PAGAMENTO
   story.append(Paragraph("02 - CONDIÇÕES DE PAGAMENTO", section_heading))
   notice_text = (
       "<b>Atenção:</b> A confirmação do agendamento somente se dará mediante o"
@@ -627,7 +627,7 @@ def gerar_pdf_bytes(dados):
   story.append(Paragraph(info_add, normal_text))
   story.append(Spacer(1, 7.0))
 
-  # SERVIÇO EXCLUSIVO DE CONCIERGE ROBÓTICA (COM QR CODE)
+  # SERVIÇO EXCLUSIVO DE CONCIERGE ROBÓTICA
   story.append(
       Paragraph("SERVIÇO EXCLUSIVO DE CONCIERGE ROBÓTICA", section_heading)
   )
@@ -774,11 +774,17 @@ st.caption(
 
 st.markdown("---")
 
-api_key = st.text_input(
-    "🔑 Insira sua API Key do Google Gemini:",
-    type="password",
-    help="Chave de acesso obtida no Google AI Studio",
-)
+# Tenta carregar a chave dos Secrets do Streamlit
+try:
+  api_key = st.secrets["GEMINI_API_KEY"]
+except Exception:
+  api_key = ""
+
+# Se a chave não for encontrada nos Secrets, exibe o aviso
+if not api_key:
+  st.error(
+      "⚠️ Chave GEMINI_API_KEY não encontrada nos Secrets do Streamlit."
+  )
 
 uploaded_file = st.file_uploader(
     "📄 Envie o PDF do Orçamento Padrão do TASY:", type=["pdf"]
@@ -824,7 +830,7 @@ if uploaded_file and api_key:
         pdf_bytes = gerar_pdf_bytes(dados)
 
         st.download_button(
-            label="📥 Baixar Orçamento Oficial em PDF (Página Única)",
+            label="📥 Baixar Orçamento Oficial em PDF",
             data=pdf_bytes,
             file_name=f"Orcamento_{dados['numero_orcamento']}_{dados['paciente'].replace(' ', '_')}.pdf",
             mime="application/pdf",
@@ -832,6 +838,3 @@ if uploaded_file and api_key:
 
       except Exception as e:
         st.error(f"Erro ao processar orçamento: {str(e)}")
-
-elif uploaded_file and not api_key:
-  st.warning("⚠️ Por favor, insira a sua API Key do Gemini para continuar.")
