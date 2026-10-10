@@ -53,7 +53,7 @@ class NumberedCanvas(canvas.Canvas):
   def draw_page_decorations(self, page_count):
     self.saveState()
     page_width, page_height = A4
-    margin = 1.0 * cm
+    margin = 1.1 * cm
 
     unimed_green = colors.HexColor("#008C50")
     dark_gray = colors.HexColor("#1F2937")
@@ -124,7 +124,7 @@ class NumberedCanvas(canvas.Canvas):
     self.setLineWidth(0.6)
     self.line(margin, footer_line_y, page_width - margin, footer_line_y)
 
-    # Rodapé - QR Code
+    # Rodapé - QR Code da Unimed
     qr_url = "https://wa.me/554891815582"
     qr_obj = qr.QrCodeWidget(qr_url)
     bounds = qr_obj.getBounds()
@@ -153,7 +153,7 @@ class NumberedCanvas(canvas.Canvas):
         text_x, 0.4 * cm, "+55 48 9181-5582 Concierge Robótica HUGF"
     )
 
-    # Rodapé - Selo ONA (Centralizado no Meio)
+    # Rodapé - Selo ONA (Centralizado)
     ona_path = None
     for filename in [
         "selo_ona.jpg",
@@ -194,21 +194,31 @@ def create_tag(text="HÍBRIDO (PACOTE)", is_particular=False):
   bg_color = (
       colors.HexColor("#DC2626") if is_particular else colors.HexColor("#008C50")
   )
-  w = len(text) * 5.2 + 10
-  h = 12
+  w = len(text) * 5.5 + 12
+  h = 13
   d = Drawing(w, h)
   d.add(Rect(0, 0, w, h, rx=6, ry=6, fillColor=bg_color, strokeColor=None))
   d.add(
       String(
           w / 2.0,
-          3.0,
+          3.2,
           text,
           textAnchor="middle",
           fontName="Helvetica-Bold",
-          fontSize=6.5,
+          fontSize=7.0,
           fillColor=colors.white,
       )
   )
+  return d
+
+
+def create_qr_code(url="https://wa.me/554891815582", size=40):
+  qr_code = qr.QrCodeWidget(url)
+  bounds = qr_code.getBounds()
+  w = bounds[2] - bounds[0]
+  h = bounds[3] - bounds[1]
+  d = Drawing(size, size, transform=[size / w, 0, 0, size / h, 0, 0])
+  d.add(qr_code)
   return d
 
 
@@ -216,15 +226,15 @@ def fmt_m(val):
   return f"R$ {val:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
 
-# --- MOTOR DE GERAÇÃO DO PDF REPORTLAB (PÁGINA ÚNICA COMPLETA) ---
+# --- MOTOR DE GERAÇÃO DO PDF REPORTLAB (PÁGINA ÚNICA BEM DISTRIBUÍDA) ---
 def gerar_pdf_bytes(dados):
   buffer = io.BytesIO()
   doc = SimpleDocTemplate(
       buffer,
       pagesize=A4,
-      leftMargin=1.0 * cm,
-      rightMargin=1.0 * cm,
-      topMargin=1.6 * cm,
+      leftMargin=1.1 * cm,
+      rightMargin=1.1 * cm,
+      topMargin=1.7 * cm,
       bottomMargin=1.1 * cm,
   )
 
@@ -240,81 +250,89 @@ def gerar_pdf_bytes(dados):
   title_style = ParagraphStyle(
       "DocTitle",
       fontName="Helvetica-Bold",
-      fontSize=9.5,
-      leading=11.0,
+      fontSize=10.5,
+      leading=12.5,
       textColor=dark_gray,
-      spaceAfter=0.5,
+      spaceAfter=1.0,
   )
   subtitle_style = ParagraphStyle(
       "DocSubtitle",
       fontName="Helvetica-Bold",
-      fontSize=6.2,
-      leading=7.5,
+      fontSize=6.8,
+      leading=8.2,
       textColor=unimed_green,
-      spaceAfter=2.5,
+      spaceAfter=4.0,
   )
   section_heading = ParagraphStyle(
       "SectionHeading",
       fontName="Helvetica-Bold",
-      fontSize=6.8,
-      leading=8.2,
+      fontSize=7.2,
+      leading=8.8,
       textColor=unimed_green,
-      spaceBefore=2.5,
-      spaceAfter=1.0,
+      spaceBefore=4.0,
+      spaceAfter=2.0,
   )
   normal_text = ParagraphStyle(
       "NormalText",
       fontName="Helvetica",
-      fontSize=5.6,
-      leading=7.0,
+      fontSize=6.1,
+      leading=7.8,
       textColor=dark_gray,
   )
   normal_bold = ParagraphStyle(
       "NormalBold",
       fontName="Helvetica-Bold",
-      fontSize=5.6,
-      leading=7.0,
+      fontSize=6.1,
+      leading=7.8,
       textColor=dark_gray,
   )
   table_header = ParagraphStyle(
       "TableHeader",
       fontName="Helvetica-Bold",
-      fontSize=5.6,
-      leading=6.8,
+      fontSize=6.1,
+      leading=7.5,
       textColor=dark_gray,
   )
   table_cell = ParagraphStyle(
       "TableCell",
       fontName="Helvetica",
-      fontSize=5.6,
-      leading=6.8,
+      fontSize=6.1,
+      leading=7.5,
       textColor=dark_gray,
   )
   table_cell_bold = ParagraphStyle(
       "TableCellBold",
       fontName="Helvetica-Bold",
-      fontSize=5.6,
-      leading=6.8,
+      fontSize=6.1,
+      leading=7.5,
       textColor=dark_gray,
   )
   table_cell_green = ParagraphStyle(
       "TableCellGreen",
       fontName="Helvetica-Bold",
-      fontSize=5.6,
-      leading=6.8,
+      fontSize=6.1,
+      leading=7.5,
       textColor=unimed_green,
   )
   concierge_style = ParagraphStyle(
       "ConciergeBox",
       fontName="Helvetica",
-      fontSize=5.4,
-      leading=6.8,
+      fontSize=6.1,
+      leading=8.0,
       textColor=dark_gray,
+  )
+  qr_label_style = ParagraphStyle(
+      "QRLabel",
+      fontName="Helvetica-Bold",
+      fontSize=5.8,
+      leading=6.8,
+      textColor=unimed_green,
+      alignment=1,
   )
 
   story = []
 
-  # Identificação do Tipo de Orçamento (Híbrido vs Particular)
+  # Identificação do Tipo de Orçamento
   tipo_str = str(dados.get("tipo_orcamento", "")).strip().upper()
   is_particular = "PARTICULAR" in tipo_str or "TOTAL" in tipo_str
 
@@ -375,18 +393,18 @@ def gerar_pdf_bytes(dados):
       ],
   ]
 
-  info_table = Table(info_data, colWidths=[9.5 * cm, 9.5 * cm])
+  info_table = Table(info_data, colWidths=[9.4 * cm, 9.4 * cm])
   info_table.setStyle(
       TableStyle([
           ("BACKGROUND", (0, 0), (-1, -1), light_bg),
-          ("BOX", (0, 0), (-1, -1), 0.4, border_gray),
-          ("INNERGRID", (0, 0), (-1, -1), 0.3, border_gray),
-          ("PADDING", (0, 0), (-1, -1), 2.0),
+          ("BOX", (0, 0), (-1, -1), 0.5, border_gray),
+          ("INNERGRID", (0, 0), (-1, -1), 0.4, border_gray),
+          ("PADDING", (0, 0), (-1, -1), 3.5),
           ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
       ])
   )
   story.append(info_table)
-  story.append(Spacer(1, 2.5))
+  story.append(Spacer(1, 7.0))
 
   # PROCEDIMENTOS PREVISTOS
   story.append(Paragraph("PROCEDIMENTOS PREVISTOS", section_heading))
@@ -401,17 +419,17 @@ def gerar_pdf_bytes(dados):
           ),
       ],
   ]
-  proc_table = Table(proc_data, colWidths=[2.8 * cm, 16.2 * cm])
+  proc_table = Table(proc_data, colWidths=[2.8 * cm, 16.0 * cm])
   proc_table.setStyle(
       TableStyle([
           ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#F3F4F6")),
-          ("BOX", (0, 0), (-1, -1), 0.4, border_gray),
-          ("INNERGRID", (0, 0), (-1, -1), 0.3, border_gray),
-          ("PADDING", (0, 0), (-1, -1), 1.8),
+          ("BOX", (0, 0), (-1, -1), 0.5, border_gray),
+          ("INNERGRID", (0, 0), (-1, -1), 0.4, border_gray),
+          ("PADDING", (0, 0), (-1, -1), 3.0),
       ])
   )
   story.append(proc_table)
-  story.append(Spacer(1, 2.5))
+  story.append(Spacer(1, 7.0))
 
   # VALORES DE RESPONSABILIDADE DO PACIENTE
   story.append(
@@ -452,33 +470,31 @@ def gerar_pdf_bytes(dados):
       [
           Paragraph(
               "Total a pagar pelo paciente",
-              ParagraphStyle("THB", parent=table_header, fontSize=6.0),
+              ParagraphStyle("THB", parent=table_header, fontSize=6.8),
           ),
           Paragraph(
               fmt_m(v_total),
               ParagraphStyle(
                   "TVB",
                   parent=table_cell_bold,
-                  fontSize=6.8,
+                  fontSize=7.5,
                   textColor=unimed_green,
               ),
           ),
       ],
   ]
-  val_table = Table(val_data, colWidths=[14.2 * cm, 4.8 * cm])
+  val_table = Table(val_data, colWidths=[14.0 * cm, 4.8 * cm])
   val_table.setStyle(
       TableStyle([
           ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#F3F4F6")),
-          ("BOX", (0, 0), (-1, -1), 0.4, border_gray),
-          ("INNERGRID", (0, 0), (-1, -1), 0.3, border_gray),
-          ("PADDING", (0, 0), (-1, -1), 1.8),
+          ("BOX", (0, 0), (-1, -1), 0.5, border_gray),
+          ("INNERGRID", (0, 0), (-1, -1), 0.4, border_gray),
+          ("PADDING", (0, 0), (-1, -1), 3.0),
           ("BACKGROUND", (0, -1), (-1, -1), colors.HexColor("#ECFDF5")),
       ])
   )
   story.append(val_table)
-
-  # ESPAÇAMENTO EXPANDIDO PARA NÃO COLAR COM AS CONDIÇÕES ABAIXO
-  story.append(Spacer(1, 4.0))
+  story.append(Spacer(1, 8.0))
 
   # 01 - ITENS NÃO INCLUSOS NESTE ORÇAMENTO (TEXTO INTEGRAL)
   story.append(
@@ -509,17 +525,17 @@ def gerar_pdf_bytes(dados):
     )
 
   no_inc_box = Table(
-      [[Paragraph(no_inc_text, normal_text)]], colWidths=[19.0 * cm]
+      [[Paragraph(no_inc_text, normal_text)]], colWidths=[18.8 * cm]
   )
   no_inc_box.setStyle(
       TableStyle([
           ("BACKGROUND", (0, 0), (-1, -1), red_box_bg),
-          ("BOX", (0, 0), (-1, -1), 0.4, red_box_border),
-          ("PADDING", (0, 0), (-1, -1), 2.2),
+          ("BOX", (0, 0), (-1, -1), 0.5, red_box_border),
+          ("PADDING", (0, 0), (-1, -1), 3.5),
       ])
   )
   story.append(no_inc_box)
-  story.append(Spacer(1, 2.0))
+  story.append(Spacer(1, 7.0))
 
   # 02 - CONDIÇÕES DE PAGAMENTO (TEXTO INTEGRAL)
   story.append(Paragraph("02 - CONDIÇÕES DE PAGAMENTO", section_heading))
@@ -528,17 +544,17 @@ def gerar_pdf_bytes(dados):
       " pagamento antecipado em até 48h úteis à realização do procedimento."
   )
   notice_box = Table(
-      [[Paragraph(notice_text, normal_text)]], colWidths=[19.0 * cm]
+      [[Paragraph(notice_text, normal_text)]], colWidths=[18.8 * cm]
   )
   notice_box.setStyle(
       TableStyle([
           ("BACKGROUND", (0, 0), (-1, -1), yellow_box_bg),
-          ("BOX", (0, 0), (-1, -1), 0.4, yellow_box_border),
-          ("PADDING", (0, 0), (-1, -1), 2.0),
+          ("BOX", (0, 0), (-1, -1), 0.5, yellow_box_border),
+          ("PADDING", (0, 0), (-1, -1), 3.2),
       ])
   )
   story.append(notice_box)
-  story.append(Spacer(1, 2.0))
+  story.append(Spacer(1, 7.0))
 
   pag_data = [
       [
@@ -574,20 +590,20 @@ def gerar_pdf_bytes(dados):
           ),
       ],
   ]
-  pag_table = Table(pag_data, colWidths=[9.5 * cm, 9.5 * cm])
+  pag_table = Table(pag_data, colWidths=[9.4 * cm, 9.4 * cm])
   pag_table.setStyle(
       TableStyle([
           ("BACKGROUND", (0, 0), (-1, -1), light_bg),
-          ("BOX", (0, 0), (-1, -1), 0.4, border_gray),
-          ("INNERGRID", (0, 0), (-1, -1), 0.3, border_gray),
-          ("PADDING", (0, 0), (-1, -1), 2.2),
+          ("BOX", (0, 0), (-1, -1), 0.5, border_gray),
+          ("INNERGRID", (0, 0), (-1, -1), 0.4, border_gray),
+          ("PADDING", (0, 0), (-1, -1), 3.5),
           ("VALIGN", (0, 0), (-1, -1), "TOP"),
       ])
   )
   story.append(pag_table)
-  story.append(Spacer(1, 2.0))
+  story.append(Spacer(1, 7.0))
 
-  # 03 - INFORMAÇÕES ADICIONAIS SOBRE O ORÇAMENTO (TEXTO INTEGRAL RECOMPOSIÇÃO)
+  # 03 - INFORMAÇÕES ADICIONAIS SOBRE O ORÇAMENTO
   story.append(
       Paragraph(
           "03 - INFORMAÇÕES ADICIONAIS SOBRE O ORÇAMENTO", section_heading
@@ -609,30 +625,42 @@ def gerar_pdf_bytes(dados):
       " será concluído em até 10 dias úteis após a alta do paciente."
   )
   story.append(Paragraph(info_add, normal_text))
-  story.append(Spacer(1, 2.0))
+  story.append(Spacer(1, 7.0))
 
-  # CONCIERGE ROBÓTICA (TEXTO INTEGRAL)
+  # SERVIÇO EXCLUSIVO DE CONCIERGE ROBÓTICA (COM QR CODE)
+  story.append(
+      Paragraph("SERVIÇO EXCLUSIVO DE CONCIERGE ROBÓTICA", section_heading)
+  )
   concierge_text = (
-      "<b>SERVIÇO EXCLUSIVO DE CONCIERGE ROBÓTICA:</b> Para proporcionar uma"
-      " experiência segura, ágil e acolhedora, os pacientes de cirurgia robótica"
-      " contam com o nosso serviço exclusivo de Concierge. Estamos à disposição"
-      " para auxiliar em todas as etapas do seu procedimento. Em caso de"
-      " dúvidas, entre em contato diretamente pelo WhatsApp: <b>+55 48"
-      " 9181-5582</b> ou pelo e-mail"
+      "Para proporcionar uma experiência segura, ágil e acolhedora, os"
+      " pacientes de cirurgia robótica contam com o nosso serviço exclusivo de"
+      " Concierge. Estamos à disposição para auxiliar em todas as etapas do"
+      " seu procedimento. Em caso de dúvidas, entre em contato diretamente"
+      " pelo WhatsApp: <b>+55 48 9181-5582</b> ou pelo e-mail"
       " <b>concierge@unimedflorianopolis.com.br</b>"
   )
-  concierge_box = Table(
-      [[Paragraph(concierge_text, concierge_style)]], colWidths=[19.0 * cm]
+  qr_drawing = create_qr_code("https://wa.me/554891815582", size=40)
+  qr_cell = [
+      qr_drawing,
+      Spacer(1, 1),
+      Paragraph("Aponte a câmera<br/>para o WhatsApp", qr_label_style),
+  ]
+
+  concierge_table = Table(
+      [[Paragraph(concierge_text, concierge_style), qr_cell]],
+      colWidths=[15.2 * cm, 3.6 * cm],
   )
-  concierge_box.setStyle(
+  concierge_table.setStyle(
       TableStyle([
           ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#ECFDF5")),
-          ("BOX", (0, 0), (-1, -1), 0.4, unimed_green),
-          ("PADDING", (0, 0), (-1, -1), 2.0),
+          ("BOX", (0, 0), (-1, -1), 0.5, unimed_green),
+          ("PADDING", (0, 0), (-1, -1), 3.8),
+          ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+          ("ALIGN", (1, 0), (1, 0), "CENTER"),
       ])
   )
-  story.append(concierge_box)
-  story.append(Spacer(1, 2.5))
+  story.append(concierge_table)
+  story.append(Spacer(1, 8.0))
 
   # ASSINATURA E RODAPÉ DA FOLHA
   dt_str = dados["data_solicitacao"]
@@ -648,7 +676,7 @@ def gerar_pdf_bytes(dados):
                       "V1",
                       parent=normal_bold,
                       textColor=unimed_green,
-                      fontSize=6.5,
+                      fontSize=7.0,
                   ),
               ),
               Paragraph(
@@ -657,17 +685,17 @@ def gerar_pdf_bytes(dados):
                       "V2",
                       parent=normal_bold,
                       textColor=dark_gray,
-                      fontSize=6.5,
+                      fontSize=7.0,
                   ),
               ),
           ]],
           colWidths=[4.2 * cm, 4.2 * cm],
           style=[
               ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#F3F4F6")),
-              ("BOX", (0, 0), (-1, -1), 0.4, border_gray),
+              ("BOX", (0, 0), (-1, -1), 0.5, border_gray),
               ("ALIGN", (0, 0), (0, 0), "LEFT"),
               ("ALIGN", (1, 0), (1, 0), "RIGHT"),
-              ("PADDING", (0, 0), (-1, -1), 2.0),
+              ("PADDING", (0, 0), (-1, -1), 2.8),
           ],
       ),
       Paragraph(
@@ -676,7 +704,7 @@ def gerar_pdf_bytes(dados):
           normal_text,
       ),
   ]]
-  signature_table = Table(signature_data, colWidths=[9.5 * cm, 9.5 * cm])
+  signature_table = Table(signature_data, colWidths=[9.4 * cm, 9.4 * cm])
   signature_table.setStyle(
       TableStyle([
           ("VALIGN", (0, 0), (-1, -1), "BOTTOM"),
