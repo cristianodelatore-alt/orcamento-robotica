@@ -99,7 +99,7 @@ class NumberedCanvas(canvas.Canvas):
       )
 
     # Número do Orçamento à Direita
-    orc_num = self._doc.orc_number if hasattr(self._doc, "orc_number") else ""
+    orc_num = getattr(self, "orc_number", "")
     self.setFont("Helvetica-Bold", 8)
     self.setFillColor(light_gray)
     self.drawRightString(
@@ -214,7 +214,6 @@ def gerar_pdf_bytes(dados):
       topMargin=2.6 * cm,
       bottomMargin=1.6 * cm,
   )
-  doc.orc_number = dados["numero_orcamento"]
 
   unimed_green = colors.HexColor("#008C50")
   dark_gray = colors.HexColor("#1F2937")
@@ -694,7 +693,10 @@ def gerar_pdf_bytes(dados):
       ])
   )
 
-  doc.build(story, canvasmaker=NumberedCanvas)
+  class CustomNumberedCanvas(NumberedCanvas):
+    orc_number = str(dados["numero_orcamento"])
+
+  doc.build(story, canvasmaker=CustomNumberedCanvas)
   pdf_value = buffer.getvalue()
   buffer.close()
   return pdf_value
