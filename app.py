@@ -90,7 +90,7 @@ def salvar_orcamento_db(dados, valor_total):
 
 def carregar_orcamentos_df():
   conn = sqlite3.connect(DB_FILE)
-  df = pd.read_sql_query("SELECT * FROM orcamentos ORDER OR BY created_at DESC", conn)
+  df = pd.read_sql_query("SELECT * FROM orcamentos ORDER BY created_at DESC", conn)
   conn.close()
   return df
 
@@ -129,7 +129,6 @@ def enviar_email_alerta(orcamentos_pendentes):
     msg["From"] = smtp_user
     msg["To"] = ", ".join(destinatarios)
 
-    # Corpo em HTML
     html = f"""
     <html>
       <body style="font-family: Arial, sans-serif; color: #1F2937;">
@@ -627,7 +626,6 @@ with tab1:
           dados = extrair_dados_tasy(texto_tasy, api_key)
           v_tot = dados["valor_hospital"] + dados["valor_anestesia"] + dados["valor_materiais"]
 
-          # Salva no banco de dados local
           salvar_orcamento_db(dados, v_tot)
 
           st.success("Orçamento processado e gravado no Histórico!")
@@ -668,7 +666,6 @@ with tab2:
   if df.empty:
     st.info("Nenhum orçamento foi gerado até o momento. Gerando orçamentos na Aba 1, eles aparecerão aqui automaticamente!")
   else:
-    # Métricas Globais
     total_emitidos = len(df)
     convertidos = len(df[df["status"] == "Convertido / Fechado"])
     pendentes = len(df[df["status"] == "Pendente"])
@@ -682,7 +679,6 @@ with tab2:
 
     st.markdown("---")
 
-    # Verificação de Alertas de 48 Horas
     st.subheader("🔔 Gestão de Alertas (48 Horas)")
     
     agora = datetime.now()
@@ -719,7 +715,6 @@ with tab2:
     st.subheader("📋 Tabela Interativa de Acompanhamento")
     st.caption("Altere o status de cada orçamento na caixa de seleção abaixo:")
 
-    # Tabela com formulário individual para edição do status
     for idx, row in df.iterrows():
       with st.expander(f"📌 Orçamento Nº {row['numero_orcamento']} - {row['paciente']} | Status Atual: {row['status']}"):
         c1, c2, c3 = st.columns([2, 2, 2])
