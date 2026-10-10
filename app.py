@@ -470,7 +470,7 @@ def gerar_pdf_bytes(dados):
       "• <b>Adicionais:</b> Demais materiais, medicamentos, gases medicinais e OPME's (órteses, próteses e materiais especiais) que não compõem o orçamento, serão acrescentados ao valor final quando utilizados.<br/>"
       "• <b>Variações e Excedentes:</b> Os valores contidos nesta previsão de gastos não são absolutos. Caso haja utilização de tempo excedente de sala cirúrgica ou período de permanência hospitalar superior ao estipulado, ocorrerão alterações de valores.<br/>"
       "• <b>Reoperações, Complicações e Intercorrências:</b> Em casos de reoperações, complicações, intercorrências ou diárias além das previstas, os valores extras serão cobrados posteriormente no momento da alta.<br/>"
-      "• <b>Devoluções de OPME:</b> Em casos de necessidade de devolução de valores referentes a OPME não utilizado durante a cirurgia, o processo será concluído em até 10 dias úteis após a alta do paciente."
+      "• <b>Devoluções de OPME:</b> Em cases de necessidade de devolução de valores referentes a OPME não utilizado durante a cirurgia, o processo será concluído em até 10 dias úteis após a alta do paciente."
   )
   story.append(Paragraph(info_add, normal_text))
   story.append(Spacer(1, 7.0))
@@ -534,7 +534,7 @@ def gerar_pdf_bytes(dados):
   return pdf_value
 
 
-# --- EXTRAÇÃO INTELIGENTE VIA GEMINI API ---
+# --- EXTRAÇÃO INTELIGENTE VIA GEMINI API (REDE DE MODELOS OFICIAIS) ---
 def extrair_dados_tasy(texto_ou_pdf, api_key):
   client = genai.Client(api_key=api_key)
   prompt = """
@@ -555,7 +555,8 @@ def extrair_dados_tasy(texto_ou_pdf, api_key):
     Retorne APENAS o JSON puro.
     """
 
-  modelos = ["gemini-3.8-flash", "gemini-2.5-flash", "gemini-1.5-flash"]
+  # Nomes universais dos modelos oficiais do Gemini no SDK genai
+  modelos = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-2.5-pro"]
   response = None
   ultimo_erro = None
 
@@ -570,13 +571,10 @@ def extrair_dados_tasy(texto_ou_pdf, api_key):
         break
     except Exception as e:
       ultimo_erro = e
-      if "503" in str(e) or "UNAVAILABLE" in str(e) or "NOT_FOUND" in str(e) or "404" in str(e):
-        continue
-      else:
-        raise e
+      continue
 
   if not response or not hasattr(response, "text") or not response.text:
-    raise Exception(f"Servidores ocupados temporariamente. Tente novamente em instantes. ({str(ultimo_erro)})")
+    raise Exception(f"Erro na conexão com os serviços de Inteligência Artificial: {str(ultimo_erro)}")
 
   data = json.loads(response.text)
 
