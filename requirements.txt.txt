@@ -1,0 +1,5 @@
+streamlit
+reportlab
+pypdf
+pillow
+google-genai
