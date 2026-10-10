@@ -98,30 +98,6 @@ class NumberedCanvas(canvas.Canvas):
           "HOSPITAL UNIMED GRANDE FLORIANÓPOLIS",
       )
 
-    # Selo ONA
-    ona_path = None
-    for filename in [
-        "selo_ona.jpg",
-        "selo_ona.png",
-        "selo_ona.jpeg",
-        "Selo ONA Nível 3 HUGF (2).jpg",
-    ]:
-      if os.path.exists(filename):
-        ona_path = filename
-        break
-
-    if ona_path:
-      ona_w = 2.6 * cm
-      ona_h = 1.38 * cm
-      self.drawImage(
-          ona_path,
-          page_width - margin - 5.8 * cm,
-          page_height - 2.2 * cm,
-          width=ona_w,
-          height=ona_h,
-          mask="auto",
-      )
-
     # Número do Orçamento à Direita
     orc_num = getattr(self, "orc_number", "")
     self.setFont("Helvetica-Bold", 8)
@@ -142,12 +118,13 @@ class NumberedCanvas(canvas.Canvas):
         page_height - 2.4 * cm,
     )
 
-    # Rodapé
+    # Rodapé - Linha Divisória
     footer_line_y = 1.5 * cm
     self.setStrokeColor(border_gray)
     self.setLineWidth(0.8)
     self.line(margin, footer_line_y, page_width - margin, footer_line_y)
 
+    # Rodapé - QR Code
     qr_url = "https://wa.me/554891815582"
     qr_obj = qr.QrCodeWidget(qr_url)
     bounds = qr_obj.getBounds()
@@ -162,6 +139,7 @@ class NumberedCanvas(canvas.Canvas):
     d_qr.add(qr_obj)
     d_qr.drawOn(self, margin, 0.35 * cm)
 
+    # Rodapé - Texto de Contato Esquerda
     text_x = margin + qr_size + 6
     self.setFont("Helvetica-Bold", 7.5)
     self.setFillColor(dark_gray)
@@ -175,6 +153,33 @@ class NumberedCanvas(canvas.Canvas):
         text_x, 0.65 * cm, "+55 48 9181-5582 Concierge Robótica HUGF"
     )
 
+    # Rodapé - Selo ONA (Centralizado no Meio)
+    ona_path = None
+    for filename in [
+        "selo_ona.jpg",
+        "selo_ona.png",
+        "selo_ona.jpeg",
+        "Selo ONA Nível 3 HUGF (2).jpg",
+    ]:
+      if os.path.exists(filename):
+        ona_path = filename
+        break
+
+    if ona_path:
+      ona_w = 2.5 * cm
+      ona_h = 1.25 * cm
+      ona_x = (page_width - ona_w) / 2.0
+      ona_y = 0.18 * cm
+      self.drawImage(
+          ona_path,
+          ona_x,
+          ona_y,
+          width=ona_w,
+          height=ona_h,
+          mask="auto",
+      )
+
+    # Rodapé - Número da Página Direita
     page_str = (
         f"Orçamento {orc_num}  |  Página {self._pageNumber} de {page_count}"
     )
