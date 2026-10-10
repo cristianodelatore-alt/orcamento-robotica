@@ -98,6 +98,30 @@ class NumberedCanvas(canvas.Canvas):
           "HOSPITAL UNIMED GRANDE FLORIANÓPOLIS",
       )
 
+    # Selo ONA
+    ona_path = None
+    for filename in [
+        "selo_ona.jpg",
+        "selo_ona.png",
+        "selo_ona.jpeg",
+        "Selo ONA Nível 3 HUGF (2).jpg",
+    ]:
+      if os.path.exists(filename):
+        ona_path = filename
+        break
+
+    if ona_path:
+      ona_w = 2.6 * cm
+      ona_h = 1.38 * cm
+      self.drawImage(
+          ona_path,
+          page_width - margin - 5.8 * cm,
+          page_height - 2.2 * cm,
+          width=ona_w,
+          height=ona_h,
+          mask="auto",
+      )
+
     # Número do Orçamento à Direita
     orc_num = getattr(self, "orc_number", "")
     self.setFont("Helvetica-Bold", 8)
