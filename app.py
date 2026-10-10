@@ -3,6 +3,7 @@ import json
 import os
 import sqlite3
 import smtplib
+import time
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime, timedelta
@@ -470,7 +471,7 @@ def gerar_pdf_bytes(dados):
       "• <b>Adicionais:</b> Demais materiais, medicamentos, gases medicinais e OPME's (órteses, próteses e materiais especiais) que não compõem o orçamento, serão acrescentados ao valor final quando utilizados.<br/>"
       "• <b>Variações e Excedentes:</b> Os valores contidos nesta previsão de gastos não são absolutos. Caso haja utilização de tempo excedente de sala cirúrgica ou período de permanência hospitalar superior ao estipulado, ocorrerão alterações de valores.<br/>"
       "• <b>Reoperações, Complicações e Intercorrências:</b> Em casos de reoperações, complicações, intercorrências ou diárias além das previstas, os valores extras serão cobrados posteriormente no momento da alta.<br/>"
-      "• <b>Devoluções de OPME:</b> Em cases de necessidade de devolução de valores referentes a OPME não utilizado durante a cirurgia, o processo será concluído em até 10 dias úteis após a alta do paciente."
+      "• <b>Devoluções de OPME:</b> Em casos de necessidade de devolução de valores referentes a OPME não utilizado durante a cirurgia, o processo será concluído em até 10 dias úteis após a alta do paciente."
   )
   story.append(Paragraph(info_add, normal_text))
   story.append(Spacer(1, 7.0))
@@ -534,7 +535,7 @@ def gerar_pdf_bytes(dados):
   return pdf_value
 
 
-# --- EXTRAÇÃO INTELIGENTE VIA GEMINI API (REDE DE MODELOS OFICIAIS) ---
+# --- EXTRAÇÃO INTELIGENTE VIA GEMINI API (REDE DE MODELOS ESTÁVEIS E RETENTATIVAS) ---
 def extrair_dados_tasy(texto_ou_pdf, api_key):
   client = genai.Client(api_key=api_key)
   prompt = """
@@ -555,26 +556,34 @@ def extrair_dados_tasy(texto_ou_pdf, api_key):
     Retorne APENAS o JSON puro.
     """
 
-  # Nomes universais dos modelos oficiais do Gemini no SDK genai
-  modelos = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-2.5-pro"]
+  # Lista de modelos estáveis de produção
+  modelos = ["gemini-2.5-flash", "gemini-2.0-flash"]
   response = None
   ultimo_erro = None
 
   for model_name in modelos:
-    try:
-      response = client.models.generate_content(
-          model=model_name,
-          contents=[prompt, texto_ou_pdf],
-          config=types.GenerateContentConfig(response_mime_type="application/json"),
-      )
-      if response and hasattr(response, "text") and response.text:
-        break
-    except Exception as e:
-      ultimo_erro = e
-      continue
+    for tentativa in range(3):
+      try:
+        response = client.models.generate_content(
+            model=model_name,
+            contents=[prompt, texto_ou_pdf],
+            config=types.GenerateContentConfig(response_mime_type="application/json"),
+        )
+        if response and hasattr(response, "text") and response.text:
+          break
+      except Exception as e:
+        ultimo_erro = e
+        err_str = str(e).upper()
+        if "503" in err_str or "UNAVAILABLE" in err_str or "RESOURCE_EXHAUSTED" in err_str or "429" in err_str:
+          time.sleep(2)
+          continue
+        else:
+          break
+    if response and hasattr(response, "text") and response.text:
+      break
 
   if not response or not hasattr(response, "text") or not response.text:
-    raise Exception(f"Erro na conexão com os serviços de Inteligência Artificial: {str(ultimo_erro)}")
+    raise Exception(f"Servidores do Google temporariamente ocupados. Por favor, clique novamente em 'Processar e Gerar Orçamento Oficial'. (Detalhes: {str(ultimo_erro)})")
 
   data = json.loads(response.text)
 
