@@ -124,7 +124,7 @@ class NumberedCanvas(canvas.Canvas):
     self.setLineWidth(0.6)
     self.line(margin, footer_line_y, page_width - margin, footer_line_y)
 
-    # Rodapé - QR Code da Unimed
+    # Rodapé - QR Code
     qr_url = "https://wa.me/554891815582"
     qr_obj = qr.QrCodeWidget(qr_url)
     bounds = qr_obj.getBounds()
@@ -332,7 +332,6 @@ def gerar_pdf_bytes(dados):
 
   story = []
 
-  # Identificação do Tipo de Orçamento
   tipo_str = str(dados.get("tipo_orcamento", "")).strip().upper()
   is_particular = "PARTICULAR" in tipo_str or "TOTAL" in tipo_str
 
@@ -345,7 +344,6 @@ def gerar_pdf_bytes(dados):
 
   tag_obj = create_tag(tag_label, is_particular=is_particular)
 
-  # TÍTULO
   story.append(Paragraph("Orçamento cirúrgico", title_style))
   story.append(
       Paragraph(
@@ -353,7 +351,6 @@ def gerar_pdf_bytes(dados):
       )
   )
 
-  # DADOS DO PACIENTE
   info_data = [
       [
           Paragraph(f"<b>PACIENTE</b><br/>{dados['paciente']}", normal_text),
@@ -406,7 +403,6 @@ def gerar_pdf_bytes(dados):
   story.append(info_table)
   story.append(Spacer(1, 7.0))
 
-  # PROCEDIMENTOS PREVISTOS
   story.append(Paragraph("PROCEDIMENTOS PREVISTOS", section_heading))
   proc_data = [
       [Paragraph("Código", table_header), Paragraph("Procedimento", table_header)],
@@ -431,7 +427,6 @@ def gerar_pdf_bytes(dados):
   story.append(proc_table)
   story.append(Spacer(1, 7.0))
 
-  # VALORES DE RESPONSABILIDADE DO PACIENTE
   story.append(
       Paragraph("VALORES DE RESPONSABILIDADE DO PACIENTE", section_heading)
   )
@@ -496,7 +491,6 @@ def gerar_pdf_bytes(dados):
   story.append(val_table)
   story.append(Spacer(1, 8.0))
 
-  # 01 - ITENS NÃO INCLUSOS NESTE ORÇAMENTO
   story.append(
       Paragraph("01 - ITENS NÃO INCLUSOS NESTE ORÇAMENTO", section_heading)
   )
@@ -537,7 +531,6 @@ def gerar_pdf_bytes(dados):
   story.append(no_inc_box)
   story.append(Spacer(1, 7.0))
 
-  # 02 - CONDIÇÕES DE PAGAMENTO
   story.append(Paragraph("02 - CONDIÇÕES DE PAGAMENTO", section_heading))
   notice_text = (
       "<b>Atenção:</b> A confirmação do agendamento somente se dará mediante o"
@@ -603,7 +596,6 @@ def gerar_pdf_bytes(dados):
   story.append(pag_table)
   story.append(Spacer(1, 7.0))
 
-  # 03 - INFORMAÇÕES ADICIONAIS SOBRE O ORÇAMENTO
   story.append(
       Paragraph(
           "03 - INFORMAÇÕES ADICIONAIS SOBRE O ORÇAMENTO", section_heading
@@ -627,7 +619,6 @@ def gerar_pdf_bytes(dados):
   story.append(Paragraph(info_add, normal_text))
   story.append(Spacer(1, 7.0))
 
-  # SERVIÇO EXCLUSIVO DE CONCIERGE ROBÓTICA
   story.append(
       Paragraph("SERVIÇO EXCLUSIVO DE CONCIERGE ROBÓTICA", section_heading)
   )
@@ -662,7 +653,6 @@ def gerar_pdf_bytes(dados):
   story.append(concierge_table)
   story.append(Spacer(1, 8.0))
 
-  # ASSINATURA E RODAPÉ DA FOLHA
   dt_str = dados["data_solicitacao"]
   orc_n = dados["numero_orcamento"]
   val_d = dados["data_validade"]
@@ -722,7 +712,7 @@ def gerar_pdf_bytes(dados):
   return pdf_value
 
 
-# --- EXTRAÇÃO INTELIGENTE DO TASY VIA GEMINI API ---
+# --- EXTRAÇÃO INTELIGENTE DO TASY VIA GEMINI API (COM FALLBACK 503) ---
 def extrair_dados_tasy(texto_ou_pdf, api_key):
   client = genai.Client(api_key=api_key)
   prompt = """
@@ -743,11 +733,42 @@ def extrair_dados_tasy(texto_ou_pdf, api_key):
     Retorne APENAS o JSON puro.
     """
 
-  response = client.models.generate_content(
-      model="gemini-3.8-flash",
-      contents=[prompt, texto_ou_pdf],
-      config=types.GenerateContentConfig(response_mime_type="application/json"),
-  )
+  # Lista de modelos para contingência automática caso o servidor do Google esteja ocupado (Erro 503)
+  modelos = ["gemini-3.8-flash", "gemini-2.5-flash", "gemini-1.5-flash"]
+  response = None
+  ultimo_erro = None
+
+  for model_name in modelos:
+    try:
+      response = client.models.generate_content(
+          model=model_name,
+          contents=[prompt, texto_ou_pdf],
+          config=types.GenerateContentConfig(
+              response_mime_type="application/json"
+          ),
+      )
+      if response and hasattr(response, "text") and response.text:
+        break
+    except Exception as e:
+      ultimo_erro = e
+      # Se for pico de demanda (503/UNAVAILABLE) ou modelo não encontrado, tenta o próximo modelo da lista
+      if (
+          "503" in str(e)
+          or "UNAVAILABLE" in str(e)
+          or "NOT_FOUND" in str(e)
+          or "404" in str(e)
+      ):
+        continue
+      else:
+        raise e
+
+  if not response or not hasattr(response, "text") or not response.text:
+    raise Exception(
+        "Os servidores da Inteligência Artificial estão temporariamente"
+        " ocupados devido a alta demanda. Por favor, aguarde alguns segundos e"
+        f" tente novamente. (Detalhes: {str(ultimo_erro)})"
+    )
+
   data = json.loads(response.text)
 
   # Cálculo da Validade de exatos 30 dias
