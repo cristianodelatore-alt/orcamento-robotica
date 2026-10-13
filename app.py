@@ -535,7 +535,7 @@ def gerar_pdf_bytes(dados):
   return pdf_value
 
 
-# --- EXTRAÇÃO INTELIGENTE VIA GEMINI API (MODELO OFICIAL GEMINI-3.8-FLASH) ---
+# --- EXTRAÇÃO INTELIGENTE VIA GEMINI API (REDE COM RETENTATIVAS E FALLBACK) ---
 def extrair_dados_tasy(texto_ou_pdf, api_key):
   client = genai.Client(api_key=api_key)
   prompt = """
@@ -556,31 +556,35 @@ def extrair_dados_tasy(texto_ou_pdf, api_key):
     Retorne APENAS o JSON puro.
     """
 
-  # Modelo oficial do Gemini configurado
-  model_name = "gemini-3.8-flash"
+  # Modelos oficiais ativos para contingência
+  modelos = ["gemini-3.8-flash", "gemini-3.1-pro-preview"]
   response = None
   ultimo_erro = None
 
-  for tentativa in range(3):
-    try:
-      response = client.models.generate_content(
-          model=model_name,
-          contents=[prompt, texto_ou_pdf],
-          config=types.GenerateContentConfig(response_mime_type="application/json"),
-      )
-      if response and hasattr(response, "text") and response.text:
-        break
-    except Exception as e:
-      ultimo_erro = e
-      err_str = str(e).upper()
-      if "503" in err_str or "UNAVAILABLE" in err_str or "RESOURCE_EXHAUSTED" in err_str or "429" in err_str:
-        time.sleep(2)
-        continue
-      else:
-        break
+  for model_name in modelos:
+    for tentativa in range(4):
+      try:
+        response = client.models.generate_content(
+            model=model_name,
+            contents=[prompt, texto_ou_pdf],
+            config=types.GenerateContentConfig(response_mime_type="application/json"),
+        )
+        if response and hasattr(response, "text") and response.text:
+          break
+      except Exception as e:
+        ultimo_erro = e
+        err_str = str(e).upper()
+        # Se for sobrecarga ou limite de requisições, aguarda progressivamente
+        if any(code in err_str for code in ["503", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED", "OVERLOADED"]):
+          time.sleep(2 * (tentativa + 1))
+          continue
+        else:
+          break
+    if response and hasattr(response, "text") and response.text:
+      break
 
   if not response or not hasattr(response, "text") or not response.text:
-    raise Exception(f"Servidores do Google ocupados. Por favor, tente novamente em instantes. ({str(ultimo_erro)})")
+    raise Exception(f"Servidores do Google temporariamente ocupados. Por favor, aguarde alguns instantes e tente novamente. (Detalhes: {str(ultimo_erro)})")
 
   data = json.loads(response.text)
 
