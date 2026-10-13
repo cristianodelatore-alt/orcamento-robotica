@@ -114,8 +114,8 @@ def enviar_email_alerta(orcamentos_pendentes):
   try:
     smtp_server = st.secrets.get("SMTP_SERVER", "smtp.gmail.com")
     smtp_port = int(st.secrets.get("SMTP_PORT", 587))
-    smtp_user = st.secrets.get("SMTP_USER", "")
-    smtp_password = st.secrets.get("SMTP_PASSWORD", "")
+    smtp_user = str(st.secrets.get("SMTP_USER", "")).strip().strip('"\'')
+    smtp_password = str(st.secrets.get("SMTP_PASSWORD", "")).strip().strip('"\'')
 
     if not smtp_user or not smtp_password:
       return False, "Credenciais de e-mail (SMTP_USER / SMTP_PASSWORD) não configuradas nos Secrets."
@@ -535,9 +535,10 @@ def gerar_pdf_bytes(dados):
   return pdf_value
 
 
-# --- EXTRAÇÃO INTELIGENTE VIA GEMINI API (MODELO OFICIAL COM RETENTATIVAS) ---
+# --- EXTRAÇÃO INTELIGENTE VIA GEMINI API (MODELO OFICIAL COM LIMPEZA DE CHAVE E RETENTATIVAS) ---
 def extrair_dados_tasy(texto_ou_pdf, api_key):
-  client = genai.Client(api_key=api_key)
+  chave_limpa = str(api_key).strip().strip('"\'').replace(" ", "")
+  client = genai.Client(api_key=chave_limpa)
   prompt = """
     Você é um extrator especialista de orçamentos hospitalares do TASY.
     Analise o documento e retorne ESTRITAMENTE um JSON com as seguintes chaves:
@@ -607,8 +608,10 @@ tab1, tab2 = st.tabs(["📄 Gerar Orçamento", "📊 Painel de Acompanhamento e 
 # --- ABA 1: GERAR ORÇAMENTO ---
 with tab1:
   st.markdown("---")
+  
+  # Carrega a chave dos Secrets removendo aspas ou espaços invisíveis
   try:
-    api_key = st.secrets["GEMINI_API_KEY"]
+    api_key = str(st.secrets["GEMINI_API_KEY"]).strip().strip('"\'').replace(" ", "")
   except Exception:
     api_key = ""
 
