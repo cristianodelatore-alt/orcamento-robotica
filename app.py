@@ -1,6 +1,7 @@
 import io
 import json
 import os
+import re
 import sqlite3
 import smtplib
 import time
@@ -464,4 +465,356 @@ def gerar_pdf_bytes(dados):
       ("VALIGN", (0, 0), (-1, -1), "TOP"),
   ]))
   story.append(pag_table)
-  story.append(Spacer(1, 7.0)
+  story.append(Spacer(1, 7.0))
+
+  story.append(Paragraph("03 - INFORMAÇÕES ADICIONAIS SOBRE O ORÇAMENTO", section_heading))
+  info_add = (
+      "• <b>Adicionais:</b> Demais materiais, medicamentos, gases medicinais e OPME's (órteses, próteses e materiais especiais) que não compõem o orçamento, serão acrescentados ao valor final quando utilizados.<br/>"
+      "• <b>Variações e Excedentes:</b> Os valores contidos nesta previsão de gastos não são absolutos. Caso haja utilização de tempo excedente de sala cirúrgica ou período de permanência hospitalar superior ao estipulado, ocorrerão alterações de valores.<br/>"
+      "• <b>Reoperações, Complicações e Intercorrências:</b> Em casos de reoperações, complicações, intercorrências ou diárias além das previstas, os valores extras serão cobrados posteriormente no momento da alta.<br/>"
+      "• <b>Devoluções de OPME:</b> Em casos de necessidade de devolução de valores referentes a OPME não utilizado durante a cirurgia, o processo será concluído em até 10 dias úteis após a alta do paciente."
+  )
+  story.append(Paragraph(info_add, normal_text))
+  story.append(Spacer(1, 7.0))
+
+  story.append(Paragraph("SERVIÇO EXCLUSIVO DE CONCIERGE ROBÓTICA", section_heading))
+  concierge_text = (
+      "Para proporcionar uma experiência segura, ágil e acolhedora, os pacientes de cirurgia robótica contam com o nosso serviço exclusivo de Concierge. Estamos à disposição para auxiliar em todas as etapas do seu procedimento. Em caso de dúvidas, entre em contato diretamente pelo WhatsApp: <b>+55 48 9181-5582</b> ou pelo e-mail <b>concierge@unimedflorianopolis.com.br</b>"
+  )
+  qr_drawing = create_qr_code("https://wa.me/554891815582", size=40)
+  qr_cell = [
+      qr_drawing,
+      Spacer(1, 1),
+      Paragraph("Aponte a câmera<br/>para o WhatsApp", qr_label_style),
+  ]
+
+  concierge_table = Table([[Paragraph(concierge_text, concierge_style), qr_cell]], colWidths=[15.2 * cm, 3.6 * cm])
+  concierge_table.setStyle(TableStyle([
+      ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#ECFDF5")),
+      ("BOX", (0, 0), (-1, -1), 0.5, unimed_green),
+      ("PADDING", (0, 0), (-1, -1), 3.8),
+      ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+      ("ALIGN", (1, 0), (1, 0), "CENTER"),
+  ]))
+  story.append(concierge_table)
+  story.append(Spacer(1, 8.0))
+
+  dt_str = dados["data_solicitacao"]
+  orc_n = dados["numero_orcamento"]
+  val_d = dados["data_validade"]
+
+  signature_data = [[
+      Table(
+          [[
+              Paragraph(f"<b>ORÇAMENTO Nº {orc_n}</b>", ParagraphStyle("V1", parent=normal_bold, textColor=unimed_green, fontSize=7.0)),
+              Paragraph(f"<b>VÁLIDO ATÉ {val_d}</b>", ParagraphStyle("V2", parent=normal_bold, textColor=dark_gray, fontSize=7.0)),
+          ]],
+          colWidths=[4.2 * cm, 4.2 * cm],
+          style=[
+              ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#F3F4F6")),
+              ("BOX", (0, 0), (-1, -1), 0.5, border_gray),
+              ("ALIGN", (0, 0), (0, 0), "LEFT"),
+              ("ALIGN", (1, 0), (1, 0), "RIGHT"),
+              ("PADDING", (0, 0), (-1, -1), 2.8),
+          ],
+      ),
+      Paragraph(f"<para align='right'>São José, {dt_str}<br/><br/>________________________________________<br/><b>Responsável Paciente</b></para>", normal_text),
+  ]]
+  signature_table = Table(signature_data, colWidths=[9.4 * cm, 9.4 * cm])
+  signature_table.setStyle(TableStyle([
+      ("VALIGN", (0, 0), (-1, -1), "BOTTOM"),
+      ("PADDING", (0, 0), (-1, -1), 0),
+  ]))
+  story.append(signature_table)
+
+  class CustomNumberedCanvas(NumberedCanvas):
+    orc_number = str(dados["numero_orcamento"])
+
+  doc.build(story, canvasmaker=CustomNumberedCanvas)
+  pdf_value = buffer.getvalue()
+  buffer.close()
+  return pdf_value
+
+
+# --- PARSER NATIVO HOSPITALAR (CONTINGÊNCIA DIRETA SEM DEPENDER DA REDE) ---
+def parse_moeda(val_str):
+  clean = re.sub(r"[^\d,\.]", "", val_str).strip()
+  if not clean:
+    return 0.0
+  if "," in clean and "." in clean:
+    clean = clean.replace(".", "").replace(",", ".")
+  elif "," in clean:
+    clean = clean.replace(",", ".")
+  elif "." in clean:
+    parts = clean.split(".")
+    if len(parts) > 2:
+      clean = "".join(parts[:-1]) + "." + parts[-1]
+  try:
+    return float(clean)
+  except:
+    return 0.0
+
+def extrair_dados_direto_tasy(texto):
+  dados = {
+      "paciente": "PACIENTE",
+      "medico": "MÉDICO RESPONSÁVEL",
+      "numero_orcamento": "000000",
+      "tipo_orcamento": "HÍBRIDO",
+      "data_solicitacao": datetime.now().strftime("%d/%m/%Y"),
+      "data_validade": "",
+      "tempo_cc": "180 Min CC",
+      "acomodacao": "Apartamento",
+      "valor_hospital": 0.0,
+      "valor_anestesia": 0.0,
+      "valor_materiais": 0.0
+  }
+
+  m_pac = re.search(r"PACIENTE\s*[:\n]\s*([^\n\r]+)", texto, re.IGNORECASE)
+  if m_pac:
+    dados["paciente"] = m_pac.group(1).strip()
+
+  m_med = re.search(r"M[ÉE]DICO\s+RESPONS[ÁA]VEL\s*[:\n]\s*([^\n\r]+)", texto, re.IGNORECASE)
+  if m_med:
+    dados["medico"] = m_med.group(1).strip()
+
+  m_data = re.search(r"DATA\s+(?:DA\s+)?SOLICITA[ÇC][ÃA]O\s*[:\n]\s*(\d{2}/\d{2}/\d{4})", texto, re.IGNORECASE)
+  if m_data:
+    dados["data_solicitacao"] = m_data.group(1).strip()
+
+  try:
+    dt_sol = datetime.strptime(dados["data_solicitacao"], "%d/%m/%Y")
+    dados["data_validade"] = (dt_sol + timedelta(days=30)).strftime("%d/%m/%Y")
+  except:
+    dados["data_validade"] = (datetime.now() + timedelta(days=30)).strftime("%d/%m/%Y")
+
+  m_tempo = re.search(r"TEMPO\s+PREVISTO[^\n\r:]*[:\n]\s*([^\n\r]+)", texto, re.IGNORECASE)
+  if m_tempo:
+    dados["tempo_cc"] = m_tempo.group(1).strip()
+
+  m_acom = re.search(r"ACOMODA[ÇC][ÃA]O\s*[:\n]\s*([^\n\r]+)", texto, re.IGNORECASE)
+  if m_acom:
+    dados["acomodacao"] = m_acom.group(1).strip()
+
+  m_tipo = re.search(r"TIPO\s+DE\s+OR[ÇC]AMENTO\s*[:\n]\s*([^\n\r]+)", texto, re.IGNORECASE)
+  if m_tipo:
+    t_val = m_tipo.group(1).strip().upper()
+    dados["tipo_orcamento"] = "PARTICULAR" if "PARTICULAR" in t_val else "HÍBRIDO"
+  elif "PARTICULAR" in texto.upper() and ("HÍBRIDO" not in texto.upper() and "HIBRIDO" not in texto.upper()):
+    dados["tipo_orcamento"] = "PARTICULAR"
+  else:
+    dados["tipo_orcamento"] = "HÍBRIDO"
+
+  m_orc = re.search(r"OR[ÇC]AMENTO\s+(?:N[º°O\.]*|NUMERO)\s*[:\n]?\s*(\d+)", texto, re.IGNORECASE)
+  if m_orc:
+    dados["numero_orcamento"] = m_orc.group(1).strip()
+
+  m_hosp = re.search(r"Taxa\s+de\s+Procedimento[^\n\r\d]*[\|\s:R\$]*([\d\.,]+)", texto, re.IGNORECASE)
+  if m_hosp:
+    dados["valor_hospital"] = parse_moeda(m_hosp.group(1))
+
+  m_anes = re.search(r"Honor[áa]rios\s+Anest[ée]sicos[^\n\r\d]*[\|\s:R\$]*([\d\.,]+)", texto, re.IGNORECASE)
+  if m_anes:
+    dados["valor_anestesia"] = parse_moeda(m_anes.group(1))
+
+  m_mat = re.search(r"Pin[çc]as\s+e\s+Materiais\s+Rob[óo]ticos[^\n\r\d]*[\|\s:R\$]*([\d\.,]+)", texto, re.IGNORECASE)
+  if m_mat:
+    dados["valor_materiais"] = parse_moeda(m_mat.group(1))
+
+  return dados
+
+
+# --- MOTOR DE EXTRAÇÃO INTELIGENTE (COM FAIL-SAFE RESILIENTE) ---
+def extrair_dados_tasy(texto_ou_pdf, api_key):
+  chave_limpa = str(api_key).strip().strip('"\'').replace(" ", "")
+  
+  if chave_limpa:
+    try:
+      client = genai.Client(api_key=chave_limpa)
+      prompt = """
+        Você é um extrator especialista de orçamentos hospitalares do TASY.
+        Analise o documento e retorne ESTRITAMENTE um JSON com as seguintes chaves:
+        {
+          "paciente": "Nome completo do paciente",
+          "medico": "Nome do médico responsável (incluindo Dr. e CRM se houver)",
+          "numero_orcamento": "Número do orçamento",
+          "tipo_orcamento": "HÍBRIDO ou PARTICULAR (identifique se é pacote híbrido ou 100% particular)",
+          "data_solicitacao": "Data da solicitação no formato DD/MM/AAAA",
+          "tempo_cc": "Tempo de centro cirúrgico ex: '180 Min CC'",
+          "acomodacao": "Tipo de acomodação (ex: Apartamento)",
+          "valor_hospital": 0.00 (float da taxa hospitalar),
+          "valor_anestesia": 0.00 (float da taxa/honorário anestésico),
+          "valor_materiais": 0.00 (float da soma de todas as pinças/materiais/drapes robóticos)
+        }
+        Retorne APENAS o JSON puro.
+        """
+
+      response = client.models.generate_content(
+          model="gemini-3.8-flash",
+          contents=[prompt, texto_ou_pdf],
+          config=types.GenerateContentConfig(response_mime_type="application/json"),
+      )
+      
+      if response and hasattr(response, "text") and response.text:
+        data = json.loads(response.text)
+        try:
+          dt_sol = datetime.strptime(data["data_solicitacao"], "%d/%m/%Y")
+        except:
+          dt_sol = datetime.now()
+          data["data_solicitacao"] = dt_sol.strftime("%d/%m/%Y")
+        data["data_validade"] = (dt_sol + timedelta(days=30)).strftime("%d/%m/%Y")
+        return data, "AI"
+    except Exception as e:
+      # Se a IA estiver com erro 503, 429 ou cota cheia, o fluxo não para
+      pass
+
+  # CONTINGÊNCIA ATIVADA: Extração nativa com parsing de texto direto do Tasy
+  dados = extrair_dados_direto_tasy(texto_ou_pdf)
+  return dados, "Nativo"
+
+
+# --- INTERFACE PRINCIPAL DO STREAMLIT ---
+if os.path.exists("unimed_logo_official.png"):
+  st.image("unimed_logo_official.png", width=220)
+
+st.title("Gerador e Gestor de Orçamentos de Cirurgia Robótica")
+st.caption("Hospital Unimed Grande Florianópolis · Programa de Cirurgia Robótica")
+
+tab1, tab2 = st.tabs(["📄 Gerar Orçamento", "📊 Painel de Acompanhamento e Conversão"])
+
+# --- ABA 1: GERAR ORÇAMENTO ---
+with tab1:
+  st.markdown("---")
+  
+  try:
+    api_key = str(st.secrets["GEMINI_API_KEY"]).strip().strip('"\'').replace(" ", "")
+  except Exception:
+    api_key = ""
+
+  uploaded_file = st.file_uploader("📄 Envie o PDF do Orçamento Padrão do TASY:", type=["pdf"])
+
+  if uploaded_file:
+    if st.button("🚀 Processar e Gerar Orçamento Oficial", type="primary"):
+      with st.spinner("Processando orçamento e atualizando histórico..."):
+        try:
+          reader = pypdf.PdfReader(uploaded_file)
+          texto_tasy = ""
+          for page in reader.pages:
+            texto_tasy += page.extract_text() + "\n"
+
+          dados, motor = extrair_dados_tasy(texto_tasy, api_key)
+          v_tot = dados["valor_hospital"] + dados["valor_anestesia"] + dados["valor_materiais"]
+
+          # Grava automaticamente no histórico
+          salvar_orcamento_db(dados, v_tot)
+
+          st.success("Orçamento processado com sucesso!")
+          st.subheader("📋 Resumo dos Dados Processados")
+
+          col1, col2 = st.columns(2)
+          with col1:
+            st.write(f"**Paciente:** {dados['paciente']}")
+            st.write(f"**Médico:** {dados['medico']}")
+            st.write(f"**Orçamento Nº:** {dados['numero_orcamento']}")
+            st.write(f"**Acomodação:** {dados['acomodacao']}")
+          with col2:
+            st.write(f"**Data Solicitação:** {dados['data_solicitacao']}")
+            st.write(f"**Validade (30 dias):** :green[**{dados['data_validade']}**]")
+            st.write(f"**Tempo CC:** {dados['tempo_cc']}")
+            st.write(f"**Tipo:** {dados.get('tipo_orcamento', 'HÍBRIDO')}")
+
+          st.markdown(f"### **Valor Total Paciente:** :green[{fmt_m(v_tot)}]")
+
+          pdf_bytes = gerar_pdf_bytes(dados)
+
+          st.download_button(
+              label="📥 Baixar Orçamento Oficial em PDF",
+              data=pdf_bytes,
+              file_name=f"Orcamento_{dados['numero_orcamento']}_{dados['paciente'].replace(' ', '_')}.pdf",
+              mime="application/pdf",
+          )
+
+        except Exception as e:
+          st.error(f"Erro ao processar orçamento: {str(e)}")
+
+# --- ABA 2: PAINEL DE ACOMPANHAMENTO ---
+with tab2:
+  st.subheader("📊 Painel de Controle e Histórico de Conversão")
+  
+  df = carregar_orcamentos_df()
+
+  if df.empty:
+    st.info("Nenhum orçamento foi gerado até o momento. Ao gerar propostas na Aba 1, elas aparecerão aqui automaticamente!")
+  else:
+    total_emitidos = len(df)
+    convertidos = len(df[df["status"] == "Convertido / Fechado"])
+    pendentes = len(df[df["status"] == "Pendente"])
+    taxa_conversao = (convertidos / total_emitidos * 100) if total_emitidos > 0 else 0.0
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Total de Orçamentos", total_emitidos)
+    m2.metric("Convertidos / Fechados", convertidos)
+    m3.metric("Pendentes", pendentes)
+    m4.metric("Taxa de Conversão", f"{taxa_conversao:.1f}%")
+
+    st.markdown("---")
+
+    st.subheader("🔔 Gestão de Alertas (48 Horas)")
+    
+    agora = datetime.now()
+    pendentes_48h = []
+
+    for _, row in df.iterrows():
+      if row["status"] == "Pendente":
+        try:
+          dt_cria = datetime.strptime(row["created_at"], "%Y-%m-%d %H:%M:%S")
+          if agora - dt_cria >= timedelta(hours=48):
+            pendentes_48h.append({
+                "numero_orcamento": row["numero_orcamento"],
+                "paciente": row["paciente"],
+                "medico": row["medico"],
+                "tipo_orcamento": row["tipo_orcamento"],
+                "data_solicitacao": row["data_solicitacao"],
+                "valor_total": row["valor_total"]
+            })
+        except Exception:
+          pass
+
+    if pendentes_48h:
+      st.warning(f"⚠️ Existem **{len(pendentes_48h)} orçamento(s)** emitido(s) há mais de 48 horas e ainda pendente(s)!")
+      if st.button("📧 Enviar Alerta de 48h por E-mail para Comercial & Particular"):
+        sucesso, msg_retorno = enviar_email_alerta(pendentes_48h)
+        if sucesso:
+          st.success(msg_retorno)
+        else:
+          st.error(msg_retorno)
+    else:
+      st.success("✅ Nenhum orçamento pendente com mais de 48 horas de emissão.")
+
+    st.markdown("---")
+    st.subheader("📋 Tabela Interativa de Acompanhamento")
+    st.caption("Altere o status de cada orçamento na caixa de seleção abaixo:")
+
+    for idx, row in df.iterrows():
+      with st.expander(f"📌 Orçamento Nº {row['numero_orcamento']} - {row['paciente']} | Status Atual: {row['status']}"):
+        c1, c2, c3 = st.columns([2, 2, 2])
+        with c1:
+          st.write(f"**Médico:** {row['medico']}")
+          st.write(f"**Modalidade:** {row['tipo_orcamento']}")
+        with c2:
+          st.write(f"**Data Solicitação:** {row['data_solicitacao']}")
+          st.write(f"**Valor Total:** R$ {row['valor_total']:,.2f}")
+        with c3:
+          opcoes_status = ["Pendente", "Convertido / Fechado", "Não Convertido / Cancelado"]
+          idx_atual = opcoes_status.index(row["status"]) if row["status"] in opcoes_status else 0
+          
+          novo_st = st.selectbox(
+              f"Alterar Status ({row['numero_orcamento']}):",
+              opcoes_status,
+              index=idx_atual,
+              key=f"status_{row['numero_orcamento']}"
+          )
+          
+          if novo_st != row["status"]:
+            atualizar_status_db(row["numero_orcamento"], novo_st)
+            st.success(f"Status do Orçamento {row['numero_orcamento']} atualizado para '{novo_st}'!")
+            st.rerun()
