@@ -1,4 +1,3 @@
-
 import io
 import json
 import os
@@ -39,18 +38,21 @@ def fmt_m(valor):
 
 
 def parse_moeda(valor):
+    """Converte valores monetários brasileiros sem interpretar ponto de milhar como decimal."""
     if isinstance(valor, (int, float)):
         return float(valor)
-    texto = re.sub(r'[^\d,.]', '', str(valor))
-    if not texto:
+    txt = re.sub(r'[^\d,.-]', '', str(valor or ''))
+    if not txt:
         return 0.0
-    if ',' in texto:
-        texto = texto.replace('.', '').replace(',', '.')
-    elif texto.count('.') > 1:
-        texto = texto.replace('.', '')
+    if ',' in txt:
+        txt = txt.replace('.', '').replace(',', '.')
+    elif txt.count('.') > 1:
+        txt = txt.replace('.', '')
+    elif '.' in txt and len(txt.rsplit('.', 1)[1]) == 3:
+        txt = txt.replace('.', '')
     try:
-        return float(texto)
-    except ValueError:
+        return float(txt)
+    except (TypeError, ValueError):
         return 0.0
 
 
@@ -428,76 +430,335 @@ def gerar_pdf_bytes(dados):
     return resultado
 
 
-def extrair_dados_direto_tasy(texto):
-    dados = dict(paciente='PACIENTE', medico='MÉDICO RESPONSÁVEL', numero_orcamento='',
-                 tipo_orcamento='HÍBRIDO', data_solicitacao=datetime.now().strftime('%d/%m/%Y'),
-                 tempo_cc='180 Min CC', acomodacao='Apartamento', valor_hospital=0.0,
-                 valor_anestesia=0.0, valor_materiais=0.0)
-    padroes = {
-        'paciente': r'PACIENTE\s*[:\n]\s*([^\n\r]+)',
-        'medico': r'M[ÉE]DICO\s+RESPONS[ÁA]VEL\s*[:\n]\s*([^\n\r]+)',
-        'numero_orcamento': r'OR[ÇC]AMENTO\s+(?:N[º°O.]*|N[ÚU]MERO)\s*[:\n]?\s*(\d+)',
-        'data_solicitacao': r'DATA\s+(?:DA\s+)?SOLICITA[ÇC][ÃA]O\s*[:\n]\s*(\d{2}/\d{2}/\d{4})',
-        'tempo_cc': r'TEMPO\s+PREVISTO[^\n\r:]*[:\n]\s*([^\n\r]+)',
-        'acomodacao': r'ACOMODA[ÇC][ÃA]O\s*[:\n]\s*([^\n\r]+)',
-        'tipo_orcamento': r'TIPO\s+DE\s+OR[ÇC]AMENTO\s*[:\n]\s*([^\n\r]+)',
-        'valor_hospital': r'Taxa\s+de\s+Procedimento[^\n\r\d]*[\|\s:R$]*([\d.,]+)',
-        'valor_anestesia': r'Honor[áa]rios\s+Anest[ée]sicos[^\n\r\d]*[\|\s:R$]*([\d.,]+)',
-        'valor_materiais': r'Pin[çc]as\s+e\s+Materiais\s+Rob[óo]ticos[^\n\r\d]*[\|\s:R$]*([\d.,]+)',
+# --- EXTRAÇÃO TASY: SEM PREENCHIMENTO FICTÍCIO ---
+# A extração é feita em linhas, preservando colunas. Etiquetas sem valor
+# não podem consumir a linha seguinte, sobretudo "Acomodação" e "Tempo CC".
+import unicodedata
+
+VALOR_BR = re.compile(
+    r"(?<![\dA-Za-z])(?:R\$\s*)?(-?\d{1,3}(?:\.\d{3})+(?:,\d{2})?|-?\d+(?:,\d{2})|-?\d+\.\d{2})(?![\dA-Za-z])",
+    re.IGNORECASE
+)
+VALOR_COM_R = re.compile(r"R\$\s*(-?\d+(?:[\.,]\d{3})*(?:[\.,]\d{2})?)", re.IGNORECASE)
+
+
+def simplificar(txt):
+    sem_acento = unicodedata.normalize('NFKD', str(txt or ''))
+    return ''.join(ch for ch in sem_acento if not unicodedata.combining(ch)).lower()
+
+
+def linhas_documento(texto, dividir_colunas=False):
+    linhas = []
+    for original in (texto or '').splitlines():
+        partes = re.split(r'\s{3,}', original.strip()) if dividir_colunas else [original.strip()]
+        linhas.extend(re.sub(r'\s+', ' ', parte).strip(' |\t')
+                      for parte in partes if parte.strip())
+    return linhas
+
+
+def rotulo_linha(linha, rotulos):
+    """Exige rótulo no início da linha e obtém só a parte após ':' ou o rótulo."""
+    for padrao in rotulos:
+        m = re.match(r'^\s*(?:' + padrao + r')\s*(?:[:\-–|]\s*)?(.*)$', linha, re.I)
+        if m:
+            return m.group(1).strip()
+    return None
+
+
+def obter_campo(linhas, rotulos, valida=None):
+    """Aceita valor adjacente se plausível; nunca aceita qualquer linha aleatória."""
+    for i, linha in enumerate(linhas):
+        resto = rotulo_linha(linha, rotulos)
+        if resto is None:
+            continue
+        candidatas = [resto]
+        if i+1 < len(linhas) and not resto:
+            candidatas.append(linhas[i+1])
+        for candidato in candidatas:
+            candidato = candidato.strip(' :|-')
+            if candidato and (valida is None or valida(candidato)):
+                return candidato
+    return ''
+
+
+def acomodacao_valida(txt):
+    s = simplificar(txt)
+    opcoes = ['apartamento', 'enfermaria', 'hospital dia', 'hospital-dia', 'suite', 'quarto',
+              'privativo', 'coletivo', 'semi privativo', 'semiprivativo']
+    if re.search(r'\d+\s*(min|hora|hrs|h)\b', s) or ' min cc' in s:
+        return False
+    return any(p in s for p in opcoes) and len(s) < 90
+
+
+def tempo_valido(txt):
+    s = simplificar(txt)
+    return bool(re.search(r'\b\d{1,4}\s*(?:min(?:utos?)?|horas?|h|hrs?)(?:\s*cc)?\b', s))
+
+
+def tempo_formatado(txt):
+    s = simplificar(txt)
+    m = re.search(r'\b(\d{1,4})\s*(min(?:utos?)?|horas?|h|hrs?)(?:\s*(?:cc|centro cirurgico))?\b', s)
+    if not m:
+        return ''
+    unidade = m.group(2)
+    if unidade.startswith('h') and not unidade.startswith('hora'):
+        return f'{int(m.group(1))} hora(s)'
+    if unidade.startswith('hora'):
+        return f'{int(m.group(1))} hora(s)'
+    return f'{int(m.group(1))} Min CC'
+
+
+def valores_na_linha(linha):
+    """Identifica quantias (não quantidades, códigos, horários ou datas)."""
+    achados = [(m.start(), parse_moeda(m.group(1))) for m in VALOR_BR.finditer(linha)]
+    if not achados:
+        achados = [(m.start(), parse_moeda(m.group(1))) for m in VALOR_COM_R.finditer(linha)]
+    return [valor for _, valor in sorted(achados)]
+
+
+def quantidade_da_linha(linha):
+    # Para valores unitários + quantidade, usar o valor monetário da última coluna.
+    vals = valores_na_linha(linha)
+    return vals[-1] if vals else None
+
+
+def encontrar_valores_categoria(linhas, categoria):
+    """Prioriza o valor total de cada categoria; soma materiais apenas se houver linhas específicas."""
+    regras = {
+        'valor_hospital': [r'\btaxa\s+(?:de\s+)?procedimento\b', r'\btaxa\s+(?:de\s+)?uso\s+(?:de\s+)?robo',
+                           r'\bprocedimento\s+robotic', r'\bpacote\s+robotic',
+                           r'\bvalor\s+hospitalar', r'\bservicos?\s+hospitalares?',
+                           r'\btotal\s+hospital', r'(?<!\d)89999901(?!\d)', r'\btaxa.*\brobo\b'],
+        'valor_anestesia': [r'honorarios?\s+(?:medicos?\s+)?anestesic',
+                            r'honorarios?\s+(?:de\s+)?anestesista', r'\bvalor\s+(?:da\s+)?anestesia',
+                            r'\btaxa\s+(?:de\s+)?anestesia', r'^anestesia\b'],
+        'valor_materiais': [r'pin[cç]as?', r'materiais?\s+robotic', r'instrumentais?\s+robotic',
+                           r'\bdrape', r'\bkit\s+robotic', r'\binsumos?\s+robotic',
+                           r'\btotal\s+(?:de\s+)?materiais?\s+robotic', r'\bvessel\s+sealer', r'\bprograsp', r'\bbipolar', r'\bmonopolar']
     }
-    for campo, padrao in padroes.items():
-        achado = re.search(padrao, texto, re.IGNORECASE)
-        if achado:
-            valor = achado.group(1).strip()
-            if campo.startswith('valor_'):
-                valor = parse_moeda(valor)
-            elif campo == 'tipo_orcamento':
-                valor = normalizar_modalidade(valor)
-            dados[campo] = valor
-    if not re.search(padroes['tipo_orcamento'], texto, re.IGNORECASE):
-        # A seleção manual na interface prevalecerá sobre este palpite.
-        if '100% CONVÊNIO' in texto.upper() or '100% CONVENIO' in texto.upper():
-            dados['tipo_orcamento'] = '100% CONVÊNIO'
-        elif 'PARTICULAR' in texto.upper() and not re.search(r'H[ÍI]BRIDO', texto, re.IGNORECASE):
-            dados['tipo_orcamento'] = 'PARTICULAR'
+    padroes = [re.compile(x, re.I) for x in regras[categoria]]
+    encontrados = []
+    for i, linha in enumerate(linhas):
+        x = simplificar(linha)
+        if not any(p.search(x) for p in padroes):
+            continue
+        if re.search(r'nao inclus|nao cobre|exceto|pagamento|instruc|observa[cç]|termos? e condi[cç]', x):
+            continue
+        valor = quantidade_da_linha(linha)
+        if valor is None and i+1 < len(linhas):
+            # Aceita a próxima linha somente quando for numérica, sem texto descritivo.
+            prox = linhas[i+1]
+            if re.fullmatch(r'[\sR$\d.,|\-]+', prox):
+                valor = quantidade_da_linha(prox)
+        if valor is not None:
+            encontrados.append((linha, valor))
+    if not encontrados:
+        return None
+    # Uma linha TOTAL explícita prevalece sobre as demais, evitando dupla contagem.
+    totais = [v for linha, v in encontrados if 'total' in simplificar(linha)]
+    if totais:
+        return totais[-1]
+    # Materiais podem constar em várias linhas; evita itens replicados na mesma lista.
+    if categoria == 'valor_materiais' and len(encontrados) > 1:
+        unicos = {(simplificar(l), v) for l, v in encontrados}
+        return round(sum(v for _, v in unicos), 2)
+    return encontrados[-1][1]
+
+
+def ler_campos_nativos(texto_normal, texto_layout=''):
+    """Extrai campos do TASY e preserva evidências de quais foram localizados."""
+    fontes = [linhas_documento(texto_layout), linhas_documento(texto_normal)]
+    # O layout preserva melhor tabelas; texto normal ajuda com títulos concatenados.
+    fontes = [f for f in fontes if f]
+    linhas = fontes[0] if fontes else []
+    linhas_aux = fontes[1] if len(fontes) > 1 else []
+    linhas_celulas = linhas_documento(texto_layout, dividir_colunas=True)
+    dados = dict(paciente='', medico='', numero_orcamento='', tipo_orcamento='HÍBRIDO',
+                 data_solicitacao='', data_validade='', tempo_cc='', acomodacao='',
+                 valor_hospital=0.0, valor_anestesia=0.0, valor_materiais=0.0)
+    encontrados = set()
+
+    testes = {
+        'paciente': ([r'(?:nome\s+(?:do\s+)?)?paciente', r'nome\s+cliente'],
+                     lambda v: bool(re.search(r'[A-Za-zÀ-ÿ]{2,}', v)) and len(v) < 140 and not re.match(r'(?i)^(m[ée]dico|or[çc]amento|data|acomoda[çc][ãa]o|tempo|conv[êe]nio)', v)),
+        'medico': ([r'm[eé]dico\s+(?:respons[aá]vel|solicitante|cirurgi[aã]o)', r'cirurgi[aã]o\s+(?:respons[aá]vel)?', r'm[eé]dico'],
+                   lambda v: bool(re.search(r'[A-Za-zÀ-ÿ]{2,}', v)) and len(v) < 140),
+        'numero_orcamento': ([r'(?:n[úu]mero\s+(?:do\s+)?)?or[cç]amento\s*(?:n[ºo.]|numero|nro|no)?',
+                              r'orc\s*(?:n[ºo.]|numero|nro)?'],
+                             lambda v: bool(re.search(r'\d{3,}', v))),
+        'data_solicitacao': ([r'data\s+(?:da\s+)?solicita[cç][aã]o', r'data\s+(?:de\s+)?emiss[aã]o',
+                             r'emiss[aã]o', r'data\s+(?:do\s+)?or[cç]amento'],
+                            lambda v: bool(re.search(r'\d{2}/\d{2}/\d{4}', v))),
+        'acomodacao': ([r'(?:tipo\s+(?:de\s+)?)?acomoda[cç][aã]o', r'tipo\s+de\s+quarto'],
+                       acomodacao_valida),
+        'tempo_cc': ([r'tempo\s+previsto(?:\s+(?:de|da)\s+cirurgia)?', r'tempo\s+cir[úu]rgico',
+                      r'dura[cç][aã]o\s+(?:do\s+)?(?:procedimento|cirurgia)', r'tempo\s+de\s+cc'],
+                     tempo_valido),
+        'data_validade': ([r'(?:data\s+de\s+)?validade', r'v[aá]lido\s+at[eé]'],
+                          lambda v: bool(re.search(r'\d{2}/\d{2}/\d{4}', v))),
+    }
+    for chave, (rotulos, valido) in testes.items():
+        valor = obter_campo(linhas, rotulos, valido)
+        if not valor and linhas_celulas:
+            valor = obter_campo(linhas_celulas, rotulos, valido)
+        if not valor and linhas_aux:
+            valor = obter_campo(linhas_aux, rotulos, valido)
+        if valor:
+            if chave in ('data_solicitacao', 'data_validade'):
+                valor = re.search(r'\d{2}/\d{2}/\d{4}', valor).group(0)
+            elif chave == 'numero_orcamento':
+                m = re.search(r'\d{3,}', valor)
+                valor = m.group(0) if m else ''
+            elif chave == 'tempo_cc':
+                valor = tempo_formatado(valor)
+            elif chave == 'acomodacao':
+                # Registra somente o tipo de acomodação, não os demais campos da linha.
+                m = re.search(r'apartamento|enfermaria|hospital[ -]?dia|su[íi]te|quarto(?:\s+privativo)?|semiprivativo|coletivo', valor, re.I)
+                valor = m.group(0).capitalize() if m else valor
+            dados[chave] = valor
+            encontrados.add(chave)
+
+    if not dados['tempo_cc']:
+        # Alguns arquivos TASY indicam a duração apenas em uma linha "300 Min CC".
+        for linha in linhas + linhas_aux:
+            if re.fullmatch(r'\s*\d{1,4}\s*min(?:utos?)?\s*cc\s*', simplificar(linha)):
+                dados['tempo_cc'] = tempo_formatado(linha)
+                encontrados.add('tempo_cc')
+                break
+    if not dados['acomodacao']:
+        # Retém como dado confirmado apenas um tipo inequivocamente presente.
+        opções = set()
+        for linha in linhas + linhas_aux:
+            if re.fullmatch(r'(?:apartamento|enfermaria|hospital[ -]?dia|su[ií]te|quarto privativo)', linha, re.I):
+                opções.add(linha.capitalize())
+        if len(opções) == 1:
+            dados['acomodacao'] = opções.pop()
+            encontrados.add('acomodacao')
+
+    for campo in ('valor_hospital', 'valor_anestesia', 'valor_materiais'):
+        valor = encontrar_valores_categoria(linhas, campo)
+        if valor is None and linhas_aux:
+            valor = encontrar_valores_categoria(linhas_aux, campo)
+        if valor is not None:
+            dados[campo] = float(valor)
+            encontrados.add(campo)
+
+    # Orçamento híbrido/particular é escolhido manualmente e prevalece sobre o PDF.
+    tipo = obter_campo(linhas, [r'tipo\s+de\s+or[cç]amento', r'modalidade'], lambda v: len(v) < 45)
+    if tipo:
+        dados['tipo_orcamento'] = normalizar_modalidade(tipo)
+    elif re.search(r'100%\s*conv[eê]nio|100%\s*convenio', texto_normal, re.I):
+        dados['tipo_orcamento'] = '100% CONVÊNIO'
+
+    if dados['data_solicitacao'] and not dados['data_validade']:
+        dados['data_validade'] = formatar_validade(dados['data_solicitacao'])
+    dados['_campos_localizados'] = sorted(encontrados)
     return dados
 
 
-def extrair_dados_tasy(texto, api_key):
-    chave = str(api_key or '').strip().strip('"\'').replace(' ', '')
-    if chave:
-        try:
-            cliente = genai.Client(api_key=chave)
-            prompt = '''Você é um extrator de orçamentos hospitalares do TASY.
-            Retorne SOMENTE JSON com campos: paciente, medico, numero_orcamento,
-            tipo_orcamento (HÍBRIDO, PARTICULAR ou 100% CONVÊNIO), data_solicitacao
-            (DD/MM/AAAA), tempo_cc, acomodacao, valor_hospital, valor_anestesia,
-            valor_materiais. Os três valores devem ser números. Não invente dados.
-            Para tipo_orcamento, se não estiver explícito, retorne HÍBRIDO.
-            '''
-            resposta = cliente.models.generate_content(
-                model=st.secrets.get('GEMINI_MODEL', 'gemini-2.5-flash'),
-                contents=[prompt, texto],
-                config=types.GenerateContentConfig(response_mime_type='application/json'))
-            extraidos = json.loads(resposta.text)
-            base = extrair_dados_direto_tasy(texto)
-            for chave_campo in base:
-                if extraidos.get(chave_campo) is not None and str(extraidos[chave_campo]).strip():
-                    base[chave_campo] = extraidos[chave_campo]
-            for campo in ('valor_hospital', 'valor_anestesia', 'valor_materiais'):
-                base[campo] = parse_moeda(base[campo])
-            base['tipo_orcamento'] = normalizar_modalidade(base['tipo_orcamento'])
-            return base, 'IA'
-        except Exception:
-            pass
-    return extrair_dados_direto_tasy(texto), 'Nativo'
+def valores_reconhecidos_no_texto(texto):
+    return [parse_moeda(m.group(1)) for m in VALOR_BR.finditer(texto)]
+
+
+def extrair_dados_tasy(texto, api_key, texto_layout=''):
+    dados = ler_campos_nativos(texto, texto_layout)
+    chave = str(api_key or '').strip().strip('\"\'').replace(' ', '')
+    if not chave:
+        dados['_aviso_motor'] = ('Gemini não configurado. Extração local utilizada; campos não '
+                                 'localizados precisam ser conferidos no orçamento original.')
+        return dados, 'Nativo'
+    try:
+        cliente = genai.Client(api_key=chave)
+        prompt = """Extraia dados APENAS do orçamento hospitalar TASY abaixo. Não deduza, não estime,
+        não preencha valores ou tempos padrão. Extraia números da coluna VALOR TOTAL, não preço
+        unitário. Acomodação só pode ser Apartamento, Enfermaria, Hospital-dia, Suíte ou outro tipo
+        de leito explicitamente escrito. "300 Min CC" é tempo, NÃO acomodação.
+        Separe os valores de: (1) taxa hospitalar de cirurgia robótica, (2) honorários anestésicos,
+        (3) TOTAL de pinças, drapes e materiais robóticos. Se a fonte mostrar apenas um total geral,
+        NÃO distribua esse total entre as três categorias. Caso uma categoria não esteja explícita,
+        retorne null. Campos: paciente, medico, numero_orcamento, tipo_orcamento,
+        data_solicitacao (DD/MM/AAAA), tempo_cc, acomodacao, valor_hospital,
+        valor_anestesia, valor_materiais. JSON puro, com null nos campos ausentes.
+        TEXTO ORIGINAL DO DOCUMENTO:
+        """
+        entrada = (texto_layout or texto)[:75000]
+        resposta = cliente.models.generate_content(
+            model=st.secrets.get('GEMINI_MODEL', 'gemini-2.5-flash'),
+            contents=[prompt, entrada],
+            config=types.GenerateContentConfig(response_mime_type='application/json', temperature=0)
+        )
+        extraidos = json.loads(resposta.text)
+        monetarios = valores_reconhecidos_no_texto(texto + '\n' + texto_layout)
+        encontrados = set(dados['_campos_localizados'])
+        for campo in ('paciente', 'medico', 'numero_orcamento', 'data_solicitacao',
+                      'tempo_cc', 'acomodacao', 'valor_hospital', 'valor_anestesia', 'valor_materiais'):
+            item = extraidos.get(campo)
+            if item is None or str(item).strip() == '':
+                continue
+            if campo in ('valor_hospital', 'valor_anestesia', 'valor_materiais'):
+                numero = parse_moeda(item)
+                # Proteção: valor sugerido pela IA precisa existir no arquivo original.
+                if not any(abs(numero - x) < 0.011 for x in monetarios):
+                    continue
+                if campo not in encontrados:
+                    dados[campo] = numero
+                    encontrados.add(campo)
+            elif campo == 'acomodacao':
+                if campo not in encontrados and acomodacao_valida(str(item)):
+                    dados[campo] = str(item).strip()
+                    encontrados.add(campo)
+            elif campo == 'tempo_cc':
+                if campo not in encontrados and tempo_valido(str(item)):
+                    duracao = tempo_formatado(str(item))
+                    # Só aceita número se houver duração correspondente no original.
+                    m = re.search(r'\d+', duracao)
+                    if m and re.search(r'(?<!\d)' + re.escape(m.group(0)) + r'\s*(?:min|hora|hrs?|h)\b',
+                                       simplificar(texto + '\n' + texto_layout)):
+                        dados[campo] = duracao
+                        encontrados.add(campo)
+            elif campo == 'numero_orcamento':
+                achado = re.search(r'\d{3,}', str(item))
+                if campo not in encontrados and achado and achado.group(0) in texto:
+                    dados[campo] = achado.group(0)
+                    encontrados.add(campo)
+            elif campo == 'data_solicitacao':
+                if campo not in encontrados and re.fullmatch(r'\d{2}/\d{2}/\d{4}', str(item)) and str(item) in texto:
+                    dados[campo] = str(item)
+                    encontrados.add(campo)
+            elif campo not in encontrados:
+                # Nomes precisam aparecer no texto (normalizados para espaços).
+                if simplificar(re.sub(r'\s+', ' ', str(item))).strip() in simplificar(re.sub(r'\s+', ' ', texto)):
+                    dados[campo] = str(item).strip()
+                    encontrados.add(campo)
+        if not dados['data_validade'] and dados['data_solicitacao']:
+            dados['data_validade'] = formatar_validade(dados['data_solicitacao'])
+        dados['_campos_localizados'] = sorted(encontrados)
+        return dados, 'Nativo + IA'
+    except Exception as erro:
+        # Não oculta falhas: o operador poderá conferir os dados com o PDF original.
+        dados['_aviso_motor'] = ('Não foi possível complementar com o Gemini ('
+                                 + type(erro).__name__ + '). Extração local utilizada.')
+        return dados, 'Nativo'
 
 
 def formatar_validade(data_str):
     try:
         return (datetime.strptime(data_str, '%d/%m/%Y') + timedelta(days=30)).strftime('%d/%m/%Y')
-    except ValueError:
+    except (ValueError, TypeError):
         return ''
+
+
+def extrair_textos_pdf(arquivo_bytes):
+    leitor = pypdf.PdfReader(io.BytesIO(arquivo_bytes))
+    texto_normal, texto_layout = [], []
+    for pagina in leitor.pages:
+        texto_normal.append(pagina.extract_text() or '')
+        try:
+            texto_layout.append(pagina.extract_text(extraction_mode='layout',
+                                                    layout_mode_space_vertically=False) or '')
+        except (TypeError, ValueError, AttributeError):
+            texto_layout.append(pagina.extract_text() or '')
+    return '\n'.join(texto_normal), '\n'.join(texto_layout)
 
 
 init_db()
@@ -525,16 +786,18 @@ with tab1:
         if st.button('🚀 Processar e Gerar Orçamento Oficial', type='primary'):
             with st.spinner('Lendo o orçamento original...'):
                 try:
-                    leitor = pypdf.PdfReader(io.BytesIO(arquivo_bytes))
-                    texto_tasy = '\n'.join(pagina.extract_text() or '' for pagina in leitor.pages)
+                    texto_tasy, texto_layout = extrair_textos_pdf(arquivo_bytes)
                     if not texto_tasy.strip():
                         st.error('PDF sem texto selecionável. Envie o PDF original exportado do TASY.')
                     else:
-                        dados, motor = extrair_dados_tasy(texto_tasy, api_key)
-                        dados['data_validade'] = formatar_validade(str(dados['data_solicitacao']))
+                        dados, motor = extrair_dados_tasy(texto_tasy, api_key, texto_layout)
+                        if not dados.get('data_validade') and dados.get('data_solicitacao'):
+                            dados['data_validade'] = formatar_validade(str(dados['data_solicitacao']))
                         st.session_state['dados_orcamento'] = dados
                         st.session_state.pop('pdf_final', None)
-                        st.success(f'Dados extraídos pelo motor {motor}. Confira e edite antes de gerar.')
+                        st.success(f'Leitura realizada ({motor}). Confira os campos antes de gerar.')
+                        if dados.get('_aviso_motor'):
+                            st.warning(dados['_aviso_motor'])
                 except Exception as erro:
                     st.error(f'Erro ao processar orçamento: {erro}')
 
@@ -542,6 +805,18 @@ with tab1:
         d = st.session_state['dados_orcamento']
         st.subheader('📋 Resumo dos Dados Processados — Edição e Conferência')
         st.info('Todos os campos podem ser corrigidos. A modalidade escolhida aqui prevalece sobre a identificada no PDF.')
+        obrigatorios = ('paciente', 'medico', 'numero_orcamento', 'acomodacao', 'tempo_cc',
+                        'data_solicitacao', 'valor_hospital', 'valor_anestesia', 'valor_materiais')
+        nomes = {'paciente': 'Paciente', 'medico': 'Médico', 'numero_orcamento': 'Número do orçamento',
+                 'acomodacao': 'Acomodação', 'tempo_cc': 'Tempo cirúrgico',
+                 'data_solicitacao': 'Data da solicitação', 'valor_hospital': 'Taxa hospitalar',
+                 'valor_anestesia': 'Honorários anestésicos', 'valor_materiais': 'Materiais robóticos'}
+        campos_nao_localizados = [nomes[k] for k in obrigatorios if k not in set(d.get('_campos_localizados', []))]
+        if campos_nao_localizados:
+            st.warning('Não localizados com segurança no TASY: ' + ', '.join(campos_nao_localizados)
+                       + '. Esses campos permanecem disponíveis para preenchimento manual.')
+        if d.get('_aviso_motor'):
+            st.caption(d['_aviso_motor'])
         with st.form('form_revisao_orcamento'):
             c1, c2 = st.columns(2)
             with c1:
@@ -566,6 +841,19 @@ with tab1:
                 st.caption('100% convênio: os valores editados acima não serão cobrados do paciente nem exibidos como pagamento particular.')
             else:
                 st.caption('Os valores acima serão apresentados como responsabilidade financeira do paciente.')
+            campos_sem_extracao = any(
+                chave not in d.get('_campos_localizados', [])
+                for chave in ('valor_hospital', 'valor_anestesia', 'valor_materiais')
+            )
+            exigir_confirmacao = tipo != '100% CONVÊNIO' and (
+                campos_sem_extracao or hosp == 0 or anest == 0 or mat == 0
+            )
+            confirmacao_valores = True
+            if exigir_confirmacao:
+                st.warning('Há valores zerados ou não localizados automaticamente. Confira no TASY antes de continuar.')
+                confirmacao_valores = st.checkbox(
+                    'Conferi os valores no PDF original e confirmo os valores indicados, inclusive eventuais zeros.',
+                    value=False)
             confirmar = st.form_submit_button('✅ Confirmar dados e gerar PDF oficial', type='primary')
         if confirmar:
             try:
@@ -573,6 +861,14 @@ with tab1:
                 datetime.strptime(data_val, '%d/%m/%Y')
                 if not numero.strip() or not paciente.strip() or not medico.strip():
                     raise ValueError('Informe número do orçamento, paciente e médico responsável.')
+                if not acomodacao.strip() or not acomodacao_valida(acomodacao.strip()):
+                    raise ValueError('Acomodação não identificada ou inválida. Confira e informe o tipo de acomodação do TASY.')
+                if not tempo.strip() or not tempo_valido(tempo.strip()):
+                    raise ValueError('Tempo cirúrgico não identificado ou inválido. Confira e informe a duração do TASY.')
+                if tipo != '100% CONVÊNIO' and (hosp + anest + mat <= 0):
+                    raise ValueError('Os três valores estão zerados. Confira o PDF e informe os valores antes de gerar.')
+                if tipo != '100% CONVÊNIO' and not confirmacao_valores:
+                    raise ValueError('É necessário conferir e confirmar os valores financeiros do orçamento original.')
                 atualizados = dict(numero_orcamento=numero.strip(), paciente=paciente.strip(),
                                    medico=medico.strip(), tipo_orcamento=tipo,
                                    data_solicitacao=data_sol, data_validade=data_val,
@@ -583,6 +879,7 @@ with tab1:
                 if len(pypdf.PdfReader(io.BytesIO(pdf)).pages) != 1:
                     raise ValueError('O conteúdo excedeu uma página A4. Reduza campos muito extensos.')
                 salvar_orcamento_db(atualizados, valor_paciente(atualizados))
+                atualizados['_campos_localizados'] = d.get('_campos_localizados', [])
                 st.session_state['dados_orcamento'] = atualizados
                 st.session_state['pdf_final'] = pdf
                 st.session_state['nome_pdf'] = (f'Orcamento_{numero.strip()}_'
@@ -652,3 +949,4 @@ with tab2:
                         atualizar_status_db(linha['numero_orcamento'], novo)
                         st.success(f"Status atualizado para '{novo}'!")
                         st.rerun()
+
