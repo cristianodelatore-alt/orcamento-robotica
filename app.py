@@ -1,16 +1,20 @@
+
 import io
 import json
 import os
 import re
 import sqlite3
 import smtplib
-import time
+from datetime import datetime, timedelta
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-from datetime import datetime, timedelta
-from PIL import Image
+from html import escape
+
+import pandas as pd
 import pypdf
-import reportlab
+import streamlit as st
+from google import genai
+from google.genai import types
 from reportlab.graphics.barcode import qr
 from reportlab.graphics.shapes import Drawing, Rect, String
 from reportlab.lib import colors
@@ -18,803 +22,633 @@ from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.units import cm
 from reportlab.pdfgen import canvas
-from reportlab.platypus import (
-    Paragraph,
-    SimpleDocTemplate,
-    Spacer,
-    Table,
-    TableStyle,
-)
-import streamlit as st
-import pandas as pd
-from google import genai
-from google.genai import types
+from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
-# --- CONFIGURAÇÃO DA PÁGINA STREAMLIT ---
-st.set_page_config(
-    page_title="Gerador de Orçamentos Robótica - HUGF",
-    page_icon="🏥",
-    layout="wide",
-)
+st.set_page_config(page_title='Gerador de Orçamentos Robótica - HUGF', page_icon='🏥', layout='wide')
+DB_FILE = 'orcamentos.db'
+MODALIDADES = ['HÍBRIDO', 'PARTICULAR', '100% CONVÊNIO']
+GREEN = colors.HexColor('#008C50')
+DARK = colors.HexColor('#1F2937')
+GRAY = colors.HexColor('#6B7280')
+BORDER = colors.HexColor('#E5E7EB')
+LIGHT = colors.HexColor('#F9FAFB')
 
-# --- BANCO DE DADOS LOCAL (SQLITE) ---
-DB_FILE = "orcamentos.db"
+
+def fmt_m(valor):
+    return f'R$ {float(valor):,.2f}'.replace(',', 'X').replace('.', ',').replace('X', '.')
+
+
+def parse_moeda(valor):
+    if isinstance(valor, (int, float)):
+        return float(valor)
+    texto = re.sub(r'[^\d,.]', '', str(valor))
+    if not texto:
+        return 0.0
+    if ',' in texto:
+        texto = texto.replace('.', '').replace(',', '.')
+    elif texto.count('.') > 1:
+        texto = texto.replace('.', '')
+    try:
+        return float(texto)
+    except ValueError:
+        return 0.0
+
+
+def normalizar_modalidade(valor):
+    texto = str(valor or '').upper().strip()
+    if 'CONVÊNIO' in texto or 'CONVENIO' in texto or 'PLANO' in texto:
+        if '100%' in texto or 'INTEGRAL' in texto or 'TOTAL' in texto:
+            return '100% CONVÊNIO'
+    if 'PARTICULAR' in texto:
+        return 'PARTICULAR'
+    return 'HÍBRIDO'
+
+
+def valor_paciente(dados):
+    if dados['tipo_orcamento'] == '100% CONVÊNIO':
+        return 0.0
+    return sum(parse_moeda(dados.get(k, 0)) for k in ('valor_hospital', 'valor_anestesia', 'valor_materiais'))
+
 
 def init_db():
-  conn = sqlite3.connect(DB_FILE)
-  c = conn.cursor()
-  c.execute("""
-      CREATE TABLE IF NOT EXISTS orcamentos (
-          numero_orcamento TEXT PRIMARY KEY,
-          paciente TEXT,
-          medico TEXT,
-          tipo_orcamento TEXT,
-          data_solicitacao TEXT,
-          data_validade TEXT,
-          tempo_cc TEXT,
-          acomodacao TEXT,
-          valor_total REAL,
-          created_at TIMESTAMP,
-          status TEXT DEFAULT 'Pendente',
-          alerta_enviado INTEGER DEFAULT 0
-      )
-  """)
-  conn.commit()
-  conn.close()
+    with sqlite3.connect(DB_FILE) as conn:
+        conn.execute('''CREATE TABLE IF NOT EXISTS orcamentos (
+            numero_orcamento TEXT PRIMARY KEY, paciente TEXT, medico TEXT,
+            tipo_orcamento TEXT, data_solicitacao TEXT, data_validade TEXT,
+            tempo_cc TEXT, acomodacao TEXT, valor_total REAL, created_at TIMESTAMP,
+            status TEXT DEFAULT 'Pendente', alerta_enviado INTEGER DEFAULT 0)''')
 
-init_db()
 
 def salvar_orcamento_db(dados, valor_total):
-  conn = sqlite3.connect(DB_FILE)
-  c = conn.cursor()
-  created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-  
-  c.execute("""
-      INSERT OR REPLACE INTO orcamentos 
-      (numero_orcamento, paciente, medico, tipo_orcamento, data_solicitacao, data_validade, tempo_cc, acomodacao, valor_total, created_at, status, alerta_enviado)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT status FROM orcamentos WHERE numero_orcamento = ?), 'Pendente'), COALESCE((SELECT alerta_enviado FROM orcamentos WHERE numero_orcamento = ?), 0))
-  """, (
-      dados["numero_orcamento"],
-      dados["paciente"],
-      dados["medico"],
-      dados.get("tipo_orcamento", "HÍBRIDO"),
-      dados["data_solicitacao"],
-      dados["data_validade"],
-      dados["tempo_cc"],
-      dados["acomodacao"],
-      valor_total,
-      created_at,
-      dados["numero_orcamento"],
-      dados["numero_orcamento"]
-  ))
-  conn.commit()
-  conn.close()
+    with sqlite3.connect(DB_FILE) as conn:
+        conn.execute('''INSERT INTO orcamentos
+            (numero_orcamento, paciente, medico, tipo_orcamento, data_solicitacao,
+             data_validade, tempo_cc, acomodacao, valor_total, created_at, status, alerta_enviado)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+            COALESCE((SELECT status FROM orcamentos WHERE numero_orcamento=?), 'Pendente'),
+            COALESCE((SELECT alerta_enviado FROM orcamentos WHERE numero_orcamento=?), 0))
+            ON CONFLICT(numero_orcamento) DO UPDATE SET
+            paciente=excluded.paciente, medico=excluded.medico,
+            tipo_orcamento=excluded.tipo_orcamento,
+            data_solicitacao=excluded.data_solicitacao,
+            data_validade=excluded.data_validade, tempo_cc=excluded.tempo_cc,
+            acomodacao=excluded.acomodacao, valor_total=excluded.valor_total''',
+            (dados['numero_orcamento'], dados['paciente'], dados['medico'],
+             dados['tipo_orcamento'], dados['data_solicitacao'], dados['data_validade'],
+             dados['tempo_cc'], dados['acomodacao'], valor_total,
+             datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+             dados['numero_orcamento'], dados['numero_orcamento']))
+
 
 def carregar_orcamentos_df():
-  conn = sqlite3.connect(DB_FILE)
-  df = pd.read_sql_query("SELECT * FROM orcamentos ORDER BY created_at DESC", conn)
-  conn.close()
-  return df
+    with sqlite3.connect(DB_FILE) as conn:
+        return pd.read_sql_query('SELECT * FROM orcamentos ORDER BY created_at DESC', conn)
+
 
 def atualizar_status_db(numero_orcamento, novo_status):
-  conn = sqlite3.connect(DB_FILE)
-  c = conn.cursor()
-  c.execute("UPDATE orcamentos SET status = ? WHERE numero_orcamento = ?", (novo_status, numero_orcamento))
-  conn.commit()
-  conn.close()
+    with sqlite3.connect(DB_FILE) as conn:
+        conn.execute('UPDATE orcamentos SET status=? WHERE numero_orcamento=?', (novo_status, numero_orcamento))
+
 
 def marcar_alerta_enviado(numero_orcamento):
-  conn = sqlite3.connect(DB_FILE)
-  c = conn.cursor()
-  c.execute("UPDATE orcamentos SET alerta_enviado = 1 WHERE numero_orcamento = ?", (numero_orcamento,))
-  conn.commit()
-  conn.close()
+    with sqlite3.connect(DB_FILE) as conn:
+        conn.execute('UPDATE orcamentos SET alerta_enviado=1 WHERE numero_orcamento=?', (numero_orcamento,))
 
-# --- FUNÇÃO DE ENVIO DE E-MAIL SMTP ---
+
 def enviar_email_alerta(orcamentos_pendentes):
-  try:
-    smtp_server = st.secrets.get("SMTP_SERVER", "smtp.gmail.com")
-    smtp_port = int(st.secrets.get("SMTP_PORT", 587))
-    smtp_user = str(st.secrets.get("SMTP_USER", "")).strip().strip('"\'')
-    smtp_password = str(st.secrets.get("SMTP_PASSWORD", "")).strip().strip('"\'')
-
-    if not smtp_user or not smtp_password:
-      return False, "Credenciais de e-mail (SMTP_USER / SMTP_PASSWORD) não configuradas nos Secrets."
-
-    destinatarios = [
-        "comercialhospital@unimedflorianopolis.com.br",
-        "cliente.particular@unimedflorianopolis.com.br",
-    ]
-
-    msg = MIMEMultipart("alternative")
-    msg["Subject"] = f"⚠️ ALERTA 48H: Orçamentos de Cirurgia Robótica Pendentes ({len(orcamentos_pendentes)})"
-    msg["From"] = smtp_user
-    msg["To"] = ", ".join(destinatarios)
-
-    html = f"""
-    <html>
-      <body style="font-family: Arial, sans-serif; color: #1F2937;">
-        <h2 style="color: #008C50;">Hospital Unimed Grande Florianópolis</h2>
+    try:
+        server_name = st.secrets.get('SMTP_SERVER', 'smtp.gmail.com')
+        port = int(st.secrets.get('SMTP_PORT', 587))
+        user = str(st.secrets.get('SMTP_USER', '')).strip().strip('"\'')
+        password = str(st.secrets.get('SMTP_PASSWORD', '')).strip().strip('"\'')
+        if not user or not password:
+            return False, 'Credenciais SMTP_USER / SMTP_PASSWORD não configuradas.'
+        destinatarios = ['comercialhospital@unimedflorianopolis.com.br',
+                         'cliente.particular@unimedflorianopolis.com.br']
+        mensagem = MIMEMultipart('alternative')
+        mensagem['Subject'] = f'ALERTA 48H: Orçamentos de Cirurgia Robótica Pendentes ({len(orcamentos_pendentes)})'
+        mensagem['From'] = user
+        mensagem['To'] = ', '.join(destinatarios)
+        linhas = ''.join(
+            '<tr>' + ''.join(f'<td>{escape(str(x))}</td>' for x in (
+                r['numero_orcamento'], r['paciente'], r['medico'], r['tipo_orcamento'],
+                r['data_solicitacao'], fmt_m(r['valor_total']))) + '</tr>'
+            for r in orcamentos_pendentes)
+        html = f'''<html><body style="font-family:Arial;color:#1F2937">
+        <h2 style="color:#008C50">Hospital Unimed Grande Florianópolis</h2>
         <h3>Programa de Cirurgia Robótica - Acompanhamento Comercial</h3>
-        <p>Atenção, os seguintes orçamentos foram emitidos há <b>mais de 48 horas</b> e continuam marcados como <b>PENDENTES</b> no sistema:</p>
-        <table border="1" cellpadding="8" cellspacing="0" style="border-collapse: collapse; width: 100%; border-color: #E5E7EB;">
-          <tr style="background-color: #F3F4F6; text-align: left;">
-            <th>Orçamento Nº</th>
-            <th>Paciente</th>
-            <th>Médico</th>
-            <th>Modalidade</th>
-            <th>Data Emissão</th>
-            <th>Valor Total</th>
-          </tr>
-    """
-    for item in orcamentos_pendentes:
-      html += f"""
-          <tr>
-            <td><b>{item['numero_orcamento']}</b></td>
-            <td>{item['paciente']}</td>
-            <td>{item['medico']}</td>
-            <td>{item['tipo_orcamento']}</td>
-            <td>{item['data_solicitacao']}</td>
-            <td>R$ {item['valor_total']:,.2f}</td>
-          </tr>
-      """
-    html += """
-        </table>
-        <p style="margin-top: 20px;">Por favor, verifique a negociação e atualize o status no painel do sistema.</p>
-        <hr style="border: 0; border-top: 1px solid #E5E7EB;"/>
-        <p style="font-size: 11px; color: #6B7280;">Este é um e-mail automático gerado pelo Gerador de Orçamentos de Cirurgia Robótica.</p>
-      </body>
-    </html>
-    """
-
-    msg.attach(MIMEText(html, "html"))
-
-    server = smtplib.SMTP(smtp_server, smtp_port)
-    server.starttls()
-    server.login(smtp_user, smtp_password)
-    server.sendmail(smtp_user, destinatarios, msg.as_string())
-    server.quit()
-
-    for item in orcamentos_pendentes:
-      marcar_alerta_enviado(item['numero_orcamento'])
-
-    return True, "Alertas enviados com sucesso por e-mail!"
-  except Exception as e:
-    return False, f"Erro ao enviar e-mail: {str(e)}"
+        <p>Os seguintes orçamentos foram emitidos há mais de 48 horas e continuam pendentes:</p>
+        <table border="1" cellpadding="8" cellspacing="0"><tr>
+        <th>Orçamento Nº</th><th>Paciente</th><th>Médico</th><th>Modalidade</th>
+        <th>Data Emissão</th><th>Valor Total</th></tr>{linhas}</table>
+        <p>Verifique a negociação e atualize o status no painel.</p></body></html>'''
+        mensagem.attach(MIMEText(html, 'html', 'utf-8'))
+        with smtplib.SMTP(server_name, port, timeout=30) as smtp:
+            smtp.starttls()
+            smtp.login(user, password)
+            smtp.sendmail(user, destinatarios, mensagem.as_string())
+        for item in orcamentos_pendentes:
+            marcar_alerta_enviado(item['numero_orcamento'])
+        return True, 'Alertas enviados com sucesso!'
+    except Exception as erro:
+        return False, f'Erro ao enviar e-mail: {erro}'
 
 
-# --- REPORTLAB CANVAS E MODELOS DE PDF ---
 class NumberedCanvas(canvas.Canvas):
-  def __init__(self, *args, **kwargs):
-    super().__init__(*args, **kwargs)
-    self._saved_page_states = []
+    orc_number = ''
 
-  def showPage(self):
-    self._saved_page_states.append(dict(self.__dict__))
-    self._startPage()
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._saved_page_states = []
 
-  def save(self):
-    num_pages = len(self._saved_page_states)
-    for state in self._saved_page_states:
-      self.__dict__.update(state)
-      self.draw_page_decorations(num_pages)
-      super().showPage()
-    super().save()
+    def showPage(self):
+        self._saved_page_states.append(dict(self.__dict__))
+        self._startPage()
 
-  def draw_page_decorations(self, page_count):
-    self.saveState()
-    page_width, page_height = A4
-    margin = 1.1 * cm
+    def save(self):
+        paginas = len(self._saved_page_states)
+        for estado in self._saved_page_states:
+            self.__dict__.update(estado)
+            self.draw_page_decorations(paginas)
+            super().showPage()
+        super().save()
 
-    unimed_green = colors.HexColor("#008C50")
-    dark_gray = colors.HexColor("#1F2937")
-    light_gray = colors.HexColor("#6B7280")
-    border_gray = colors.HexColor("#E5E7EB")
+    def draw_page_decorations(self, paginas):
+        self.saveState()
+        largura, altura = A4
+        margem = 1.1 * cm
+        caminho_logo = 'unimed_logo_official.png'
+        if os.path.exists(caminho_logo):
+            largura_logo = 3.6 * cm
+            self.drawImage(caminho_logo, margem, altura - 1.55 * cm,
+                           width=largura_logo, height=largura_logo / (1560 / 646), mask='auto')
+            self.setFont('Helvetica-Bold', 9)
+            self.setFillColor(DARK)
+            self.drawString(margem + largura_logo + .25 * cm, altura - 1 * cm,
+                            'HOSPITAL UNIMED GRANDE FLORIANÓPOLIS')
+            self.setFont('Helvetica-Bold', 7.5)
+            self.setFillColor(GREEN)
+            self.drawString(margem + largura_logo + .25 * cm, altura - 1.3 * cm,
+                            'PROGRAMA DE CIRURGIA ROBÓTICA')
+        self.setFillColor(GRAY)
+        self.setFont('Helvetica-Bold', 7)
+        self.drawRightString(largura - margem, altura - .8 * cm, 'ORÇAMENTO Nº')
+        self.setFillColor(GREEN)
+        self.setFont('Helvetica-Bold', 14)
+        self.drawRightString(largura - margem, altura - 1.35 * cm, str(self.orc_number))
+        self.setStrokeColor(BORDER)
+        self.line(margem, altura - 1.6 * cm, largura - margem, altura - 1.6 * cm)
+        self.line(margem, 1.05 * cm, largura - margem, 1.05 * cm)
+        codigo = qr.QrCodeWidget('https://wa.me/554891815582')
+        b = codigo.getBounds()
+        desenho = Drawing(18, 18, transform=[18/(b[2]-b[0]), 0, 0, 18/(b[3]-b[1]), 0, 0])
+        desenho.add(codigo)
+        desenho.drawOn(self, margem, .2 * cm)
+        self.setFillColor(DARK)
+        self.setFont('Helvetica-Bold', 6.5)
+        self.drawString(margem + 22, .7 * cm, 'Hospital Unimed Grande Florianópolis')
+        self.setFillColor(GRAY)
+        self.setFont('Helvetica', 6.5)
+        self.drawString(margem + 22, .4 * cm, '+55 48 9181-5582 Concierge Robótica HUGF')
+        for nome in ['selo_ona.jpg', 'selo_ona.png', 'selo_ona.jpeg', 'Selo ONA Nível 3 HUGF (2).jpg']:
+            if os.path.exists(nome):
+                self.drawImage(nome, (largura - 2.2 * cm) / 2, .02 * cm,
+                               width=2.2 * cm, height=1.1 * cm, mask='auto')
+                break
+        self.drawRightString(largura - margem, .55 * cm,
+                             f'Orçamento {self.orc_number}  |  Página {self._pageNumber} de {paginas}')
+        self.restoreState()
 
-    logo_path = "unimed_logo_official.png"
-    if os.path.exists(logo_path):
-      logo_w = 3.6 * cm
-      logo_h = logo_w / (1560 / 646)
-      self.drawImage(
-          logo_path,
-          margin,
-          page_height - 1.55 * cm,
-          width=logo_w,
-          height=logo_h,
-          mask="auto",
-      )
-      self.setFont("Helvetica-Bold", 9.0)
-      self.setFillColor(dark_gray)
-      self.drawString(margin + logo_w + 0.25 * cm, page_height - 1.0 * cm, "HOSPITAL UNIMED GRANDE FLORIANÓPOLIS")
-      self.setFont("Helvetica-Bold", 7.5)
-      self.setFillColor(unimed_green)
-      self.drawString(margin + logo_w + 0.25 * cm, page_height - 1.3 * cm, "PROGRAMA DE CIRURGIA ROBÓTICA")
 
-    orc_num = getattr(self, "orc_number", "")
-    self.setFont("Helvetica-Bold", 7.0)
-    self.setFillColor(light_gray)
-    self.drawRightString(page_width - margin, page_height - 0.8 * cm, "ORÇAMENTO Nº")
-    self.setFont("Helvetica-Bold", 14.0)
-    self.setFillColor(unimed_green)
-    self.drawRightString(page_width - margin, page_height - 1.35 * cm, orc_num)
+def create_tag(texto, particular=False):
+    cor = colors.HexColor('#DC2626') if particular else GREEN
+    largura = len(texto) * 5.5 + 12
+    desenho = Drawing(largura, 13)
+    desenho.add(Rect(0, 0, largura, 13, rx=6, ry=6, fillColor=cor, strokeColor=None))
+    desenho.add(String(largura/2, 3.2, texto, textAnchor='middle',
+                       fontName='Helvetica-Bold', fontSize=7, fillColor=colors.white))
+    return desenho
 
-    self.setStrokeColor(border_gray)
-    self.setLineWidth(0.6)
-    self.line(margin, page_height - 1.6 * cm, page_width - margin, page_height - 1.6 * cm)
 
-    footer_line_y = 1.05 * cm
-    self.setStrokeColor(border_gray)
-    self.setLineWidth(0.6)
-    self.line(margin, footer_line_y, page_width - margin, footer_line_y)
+def create_qr_code(url='https://wa.me/554891815582', size=40):
+    codigo = qr.QrCodeWidget(url)
+    b = codigo.getBounds()
+    desenho = Drawing(size, size, transform=[size/(b[2]-b[0]), 0, 0, size/(b[3]-b[1]), 0, 0])
+    desenho.add(codigo)
+    return desenho
 
-    qr_url = "https://wa.me/554891815582"
-    qr_obj = qr.QrCodeWidget(qr_url)
-    bounds = qr_obj.getBounds()
-    qr_w = bounds[2] - bounds[0]
-    qr_h = bounds[3] - bounds[1]
-    qr_size = 18
-    d_qr = Drawing(qr_size, qr_size, transform=[qr_size / qr_w, 0, 0, qr_size / qr_h, 0, 0])
-    d_qr.add(qr_obj)
-    d_qr.drawOn(self, margin, 0.2 * cm)
-
-    text_x = margin + qr_size + 4
-    self.setFont("Helvetica-Bold", 6.5)
-    self.setFillColor(dark_gray)
-    self.drawString(text_x, 0.7 * cm, "Hospital Unimed Grande Florianópolis")
-    self.setFont("Helvetica", 6.5)
-    self.setFillColor(light_gray)
-    self.drawString(text_x, 0.4 * cm, "+55 48 9181-5582 Concierge Robótica HUGF")
-
-    ona_path = None
-    for filename in ["selo_ona.jpg", "selo_ona.png", "selo_ona.jpeg", "Selo ONA Nível 3 HUGF (2).jpg"]:
-      if os.path.exists(filename):
-        ona_path = filename
-        break
-
-    if ona_path:
-      ona_w = 2.2 * cm
-      ona_h = 1.1 * cm
-      ona_x = (page_width - ona_w) / 2.0
-      ona_y = 0.02 * cm
-      self.drawImage(ona_path, ona_x, ona_y, width=ona_w, height=ona_h, mask="auto")
-
-    page_str = f"Orçamento {orc_num}  |  Página {self._pageNumber} de {page_count}"
-    self.setFont("Helvetica", 6.5)
-    self.setFillColor(light_gray)
-    self.drawRightString(page_width - margin, 0.55 * cm, page_str)
-    self.restoreState()
-
-def create_tag(text="HÍBRIDO (PACOTE)", is_particular=False):
-  bg_color = colors.HexColor("#DC2626") if is_particular else colors.HexColor("#008C50")
-  w = len(text) * 5.5 + 12
-  h = 13
-  d = Drawing(w, h)
-  d.add(Rect(0, 0, w, h, rx=6, ry=6, fillColor=bg_color, strokeColor=None))
-  d.add(String(w / 2.0, 3.2, text, textAnchor="middle", fontName="Helvetica-Bold", fontSize=7.0, fillColor=colors.white))
-  return d
-
-def create_qr_code(url="https://wa.me/554891815582", size=40):
-  qr_code = qr.QrCodeWidget(url)
-  bounds = qr_code.getBounds()
-  w = bounds[2] - bounds[0]
-  h = bounds[3] - bounds[1]
-  d = Drawing(size, size, transform=[size / w, 0, 0, size / h, 0, 0])
-  d.add(qr_code)
-  return d
-
-def fmt_m(val):
-  return f"R$ {val:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
 def gerar_pdf_bytes(dados):
-  buffer = io.BytesIO()
-  doc = SimpleDocTemplate(
-      buffer,
-      pagesize=A4,
-      leftMargin=1.1 * cm,
-      rightMargin=1.1 * cm,
-      topMargin=1.7 * cm,
-      bottomMargin=1.1 * cm,
-  )
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=A4, leftMargin=1.1*cm, rightMargin=1.1*cm,
+                            topMargin=1.7*cm, bottomMargin=1.1*cm)
+    estilo = lambda nome, tamanho=6.1, leading=7.8, negrito=False, cor=DARK, **kw: ParagraphStyle(
+        nome, fontName='Helvetica-Bold' if negrito else 'Helvetica',
+        fontSize=tamanho, leading=leading, textColor=cor, **kw)
+    titulo = estilo('Titulo', 10.5, 12.5, True)
+    subtitulo = estilo('Subtitulo', 6.8, 8.2, True, GREEN)
+    secao = estilo('Secao', 7.2, 8.8, True, GREEN, spaceBefore=4, spaceAfter=2)
+    texto = estilo('Texto')
+    cab = estilo('Cabecalho', 6.1, 7.5, True)
+    cel = estilo('Celula', 6.1, 7.5)
+    cel_b = estilo('CelulaB', 6.1, 7.5, True)
+    cel_v = estilo('CelulaV', 6.1, 7.5, True, GREEN)
+    pequeno = estilo('Pequeno', 5.8, 6.8, True, GREEN, alignment=1)
+    p = lambda t, e=texto: Paragraph(str(t), e)
+    seguro = lambda chave: escape(str(dados.get(chave, '')))
+    modalidade = dados['tipo_orcamento']
+    particular = modalidade == 'PARTICULAR'
+    convenio = modalidade == '100% CONVÊNIO'
+    rotulo = {'PARTICULAR': 'PARTICULAR (PACOTE)', 'HÍBRIDO': 'HÍBRIDO (PACOTE)',
+              '100% CONVÊNIO': '100% CONVÊNIO'}[modalidade]
+    subt = ('ATENDIMENTO POR CONVÊNIO · CIRURGIA ROBÓTICA' if convenio else
+            'ATENDIMENTO PARTICULAR · PACOTE · CIRURGIA ROBÓTICA')
+    story = [p('Orçamento cirúrgico', titulo), p(subt, subtitulo)]
 
-  unimed_green = colors.HexColor("#008C50")
-  dark_gray = colors.HexColor("#1F2937")
-  light_bg = colors.HexColor("#F9FAFB")
-  border_gray = colors.HexColor("#E5E7EB")
-  red_box_bg = colors.HexColor("#FEF2F2")
-  red_box_border = colors.HexColor("#FCA5A5")
-  yellow_box_bg = colors.HexColor("#FEFCE8")
-  yellow_box_border = colors.HexColor("#FDE047")
+    infos = [
+        [p(f'<b>PACIENTE</b><br/>{seguro("paciente")}'), p(f'<b>MÉDICO RESPONSÁVEL</b><br/>{seguro("medico")}')],
+        [p(f'<b>DATA DA SOLICITAÇÃO</b><br/>{seguro("data_solicitacao")}'), p(f'<b>VALIDADE DO ORÇAMENTO</b><br/>{seguro("data_validade")} · 30 dias')],
+        [p(f'<b>TEMPO PREVISTO DE CIRURGIA</b><br/>{seguro("tempo_cc")}'), p(f'<b>ACOMODAÇÃO</b><br/>{seguro("acomodacao")}')],
+        [[p('<b>TIPO DE ORÇAMENTO</b>'), Spacer(1, 1), create_tag(rotulo, particular)],
+         p(f'<b>CONVÊNIO / MODALIDADE</b><br/>{"Particular" if particular else "Convênio integral" if convenio else "Unimed/Híbrido"}')],
+    ]
+    tabela = Table(infos, colWidths=[9.4*cm, 9.4*cm])
+    tabela.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,-1),LIGHT),('BOX',(0,0),(-1,-1),.5,BORDER),
+                               ('INNERGRID',(0,0),(-1,-1),.4,BORDER),('PADDING',(0,0),(-1,-1),3.5),
+                               ('VALIGN',(0,0),(-1,-1),'MIDDLE')]))
+    story.extend([tabela, Spacer(1, 7), p('PROCEDIMENTOS PREVISTOS', secao)])
+    descricao = ('Taxa de procedimento robótico particular' if particular else
+                 'Procedimento robótico pelo convênio' if convenio else
+                 'Taxa de procedimento robótico híbrido')
+    proc = Table([[p('Código', cab), p('Procedimento', cab)],
+                  [p('89999901', cel), p(descricao, cel)]], colWidths=[2.8*cm, 16*cm])
+    proc.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.HexColor('#F3F4F6')),
+                              ('BOX',(0,0),(-1,-1),.5,BORDER),('INNERGRID',(0,0),(-1,-1),.4,BORDER),
+                              ('PADDING',(0,0),(-1,-1),3)]))
+    story.extend([proc, Spacer(1, 7)])
 
-  title_style = ParagraphStyle("DocTitle", fontName="Helvetica-Bold", fontSize=10.5, leading=12.5, textColor=dark_gray, spaceAfter=1.0)
-  subtitle_style = ParagraphStyle("DocSubtitle", fontName="Helvetica-Bold", fontSize=6.8, leading=8.2, textColor=unimed_green, spaceAfter=4.0)
-  section_heading = ParagraphStyle("SectionHeading", fontName="Helvetica-Bold", fontSize=7.2, leading=8.8, textColor=unimed_green, spaceBefore=4.0, spaceAfter=2.0)
-  normal_text = ParagraphStyle("NormalText", fontName="Helvetica", fontSize=6.1, leading=7.8, textColor=dark_gray)
-  normal_bold = ParagraphStyle("NormalBold", fontName="Helvetica-Bold", fontSize=6.1, leading=7.8, textColor=dark_gray)
-  table_header = ParagraphStyle("TableHeader", fontName="Helvetica-Bold", fontSize=6.1, leading=7.5, textColor=dark_gray)
-  table_cell = ParagraphStyle("TableCell", fontName="Helvetica", fontSize=6.1, leading=7.5, textColor=dark_gray)
-  table_cell_bold = ParagraphStyle("TableCellBold", fontName="Helvetica-Bold", fontSize=6.1, leading=7.5, textColor=dark_gray)
-  table_cell_green = ParagraphStyle("TableCellGreen", fontName="Helvetica-Bold", fontSize=6.1, leading=7.5, textColor=unimed_green)
-  concierge_style = ParagraphStyle("ConciergeBox", fontName="Helvetica", fontSize=6.1, leading=8.0, textColor=dark_gray)
-  qr_label_style = ParagraphStyle("QRLabel", fontName="Helvetica-Bold", fontSize=5.8, leading=6.8, textColor=unimed_green, alignment=1)
+    if convenio:
+        story.append(p('VALORES DE RESPONSABILIDADE DO PACIENTE', secao))
+        aviso = Table([[p('<b>Modalidade 100% convênio.</b> Não há valor particular a pagar neste orçamento. '
+                           'A cobertura e as autorizações devem ser confirmadas junto à operadora.')]],
+                       colWidths=[18.8*cm])
+        aviso.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,-1),colors.HexColor('#ECFDF5')),
+                                   ('BOX',(0,0),(-1,-1),.5,GREEN),('PADDING',(0,0),(-1,-1),4)]))
+        story.extend([aviso, Spacer(1, 8)])
+    else:
+        v_hosp = parse_moeda(dados['valor_hospital'])
+        v_anes = parse_moeda(dados['valor_anestesia'])
+        v_mat = parse_moeda(dados['valor_materiais'])
+        total = v_hosp + v_anes + v_mat
+        story.append(p('VALORES DE RESPONSABILIDADE DO PACIENTE', secao))
+        linhas = [[p('Descrição', cab), p('Valor', cab)],
+                  [p('Taxa de Procedimento (Hospital)', cel), p(fmt_m(v_hosp), cel)],
+                  [p('Honorários Anestésicos', cel), p(fmt_m(v_anes), cel)],
+                  [p('Pinças e Materiais Robóticos', cel), p(fmt_m(v_mat), cel)],
+                  [p('Refeição Paciente e Acompanhante*', cel), p('Cortesia', cel_v)],
+                  [p('Subtotal', cel_b), p(fmt_m(total), cel_b)],
+                  [p('Desconto', cel), p('R$ 0,00', cel)],
+                  [p('Total a pagar pelo paciente', cel_b), p(fmt_m(total), cel_v)]]
+        valores = Table(linhas, colWidths=[14*cm, 4.8*cm])
+        valores.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.HexColor('#F3F4F6')),
+                                     ('BACKGROUND',(0,-1),(-1,-1),colors.HexColor('#ECFDF5')),
+                                     ('BOX',(0,0),(-1,-1),.5,BORDER),('INNERGRID',(0,0),(-1,-1),.4,BORDER),
+                                     ('PADDING',(0,0),(-1,-1),3)]))
+        story.extend([valores, Spacer(1, 8)])
 
-  story = []
+    story.append(p('01 - ITENS NÃO INCLUSOS NESTE ORÇAMENTO', secao))
+    if particular:
+        honor = ('<b>Honorários Médicos da Equipe Cirúrgica (Modalidade Particular):</b> Os honorários '
+                 'da equipe cirúrgica não possuem cobertura deste orçamento hospitalar e deverão ser '
+                 'acertados e pagos pelo paciente diretamente à equipe cirúrgica. '
+                 '<i>(Nota: Os honorários anestésicos já estão devidamente inclusos neste orçamento).</i>')
+    elif convenio:
+        honor = ('<b>Honorários e cobertura assistencial:</b> Os itens e honorários sujeitos à cobertura '
+                 'do convênio dependem das regras contratuais e das autorizações da operadora. '
+                 'Este documento não constitui autorização de cobertura.')
+    else:
+        honor = ('<b>Honorários Médicos da Equipe Cirúrgica (Modalidade Híbrida):</b> O plano de saúde '
+                 'cobrirá a parcela do honorário médico correspondente ao procedimento na modalidade '
+                 'convencional. A diferença relativa ao ato cirúrgico robótico não possui cobertura '
+                 'do plano e deverá ser negociada e paga pelo paciente diretamente à equipe cirúrgica. '
+                 '<i>(Nota: Os honorários anestésicos já estão devidamente inclusos neste orçamento).</i>')
+    nao_inclusos = honor + ('<br/>• Exames laboratoriais e de imagem/diagnóstico;'
+                             '<br/>• Sessões de fonoaudiologia e fisioterapia;'
+                             '<br/>• Sangue e hemoderivados.') if not convenio else honor
+    quadro = Table([[p(nao_inclusos)]], colWidths=[18.8*cm])
+    quadro.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,-1),colors.HexColor('#FEF2F2')),
+                                ('BOX',(0,0),(-1,-1),.5,colors.HexColor('#FCA5A5')),
+                                ('PADDING',(0,0),(-1,-1),3.5)]))
+    story.extend([quadro, Spacer(1, 7)])
 
-  tipo_str = str(dados.get("tipo_orcamento", "")).strip().upper()
-  is_particular = "PARTICULAR" in tipo_str or "TOTAL" in tipo_str
+    story.append(p('02 - CONDIÇÕES DE PAGAMENTO' if not convenio else '02 - CONDIÇÕES DO ATENDIMENTO', secao))
+    aviso_texto = ('<b>Atenção:</b> A confirmação do agendamento somente se dará mediante o pagamento '
+                   'antecipado em até 48h úteis à realização do procedimento.' if not convenio else
+                   '<b>Atenção:</b> O agendamento está sujeito à confirmação das autorizações e da '
+                   'elegibilidade junto ao convênio, conforme o fluxo do hospital.')
+    aviso = Table([[p(aviso_texto)]], colWidths=[18.8*cm])
+    aviso.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,-1),colors.HexColor('#FEFCE8')),
+                               ('BOX',(0,0),(-1,-1),.5,colors.HexColor('#FDE047')),
+                               ('PADDING',(0,0),(-1,-1),3.2)]))
+    story.extend([aviso, Spacer(1, 7)])
+    if not convenio:
+        pagamento = [
+            [p('<b>PAGAMENTO À VISTA</b><br/>Dinheiro em espécie, cartão de débito ou PIX.<br/>'
+               '<b>Chave PIX (CNPJ):</b> 77.858.611/0014-14<br/><b>Favorecido:</b> Unimed Grande '
+               'Florianópolis Cooperativa de Trabalho Médico'),
+             p('<b>TRANSFERÊNCIA BANCÁRIA</b><br/><b>Favorecido:</b> Unimed Grande Florianópolis '
+               'Cooperativa de Trabalho Médico<br/><b>CNPJ:</b> 77.858.611/0014-14<br/>'
+               '<b>Banco Unicred (136)</b> | <b>Agência:</b> 1214-9 | <b>Conta:</b> 102646-1')],
+            [p('<b>CARTÃO DE CRÉDITO</b><br/>• Até R$ 10.000,00: Parcelamento em até 6x sem juros.'
+               '<br/>• Acima de R$ 10.000,00: Parcelamento em até 10x sem juros.<br/>'
+               '<i>Solicite o link informando nº do orçamento, bandeira e parcelas.</i><br/>'
+               '<b>Contato:</b> +55 48 9181-5582 | concierge@unimedflorianopolis.com.br'),
+             p('<b>ENVIO DO COMPROVANTE / LINK DE PAGAMENTO</b><br/><b>WhatsApp:</b> '
+               '+55 48 9181-5582<br/><b>E-mail:</b> concierge@unimedflorianopolis.com.br')]
+        ]
+        tb_pag = Table(pagamento, colWidths=[9.4*cm, 9.4*cm])
+        tb_pag.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,-1),LIGHT),
+                                    ('BOX',(0,0),(-1,-1),.5,BORDER),
+                                    ('INNERGRID',(0,0),(-1,-1),.4,BORDER),
+                                    ('PADDING',(0,0),(-1,-1),3.5),
+                                    ('VALIGN',(0,0),(-1,-1),'TOP')]))
+        story.extend([tb_pag, Spacer(1, 7)])
 
-  if is_particular:
-    tag_label = "PARTICULAR (PACOTE)"
-    convenio_label = "Particular"
-  else:
-    tag_label = "HÍBRIDO (PACOTE)"
-    convenio_label = "Unimed/Híbrido"
+    story.append(p('03 - INFORMAÇÕES ADICIONAIS SOBRE O ORÇAMENTO', secao))
+    adicionais = ('• <b>Adicionais:</b> Demais materiais, medicamentos, gases medicinais e OPMEs '
+                 '(órteses, próteses e materiais especiais) que não compõem o orçamento serão '
+                 'acrescentados ao valor final quando utilizados.<br/>'
+                 '• <b>Variações e Excedentes:</b> Os valores contidos nesta previsão de gastos não são '
+                 'absolutos. Caso haja utilização de tempo excedente de sala cirúrgica ou período de '
+                 'permanência hospitalar superior ao estipulado, ocorrerão alterações de valores.<br/>'
+                 '• <b>Reoperações, Complicações e Intercorrências:</b> Em casos de reoperações, '
+                 'complicações, intercorrências ou diárias além das previstas, os valores extras serão '
+                 'cobrados posteriormente no momento da alta.<br/>'
+                 '• <b>Devoluções de OPME:</b> Em casos de necessidade de devolução de valores referentes '
+                 'a OPME não utilizado durante a cirurgia, o processo será concluído em até 10 dias '
+                 'úteis após a alta do paciente.')
+    if convenio:
+        adicionais = ('• <b>Cobertura e autorizações:</b> A realização e a cobertura de procedimentos, '
+                     'materiais, exames, diárias e eventuais intercorrências dependem das regras do '
+                     'convênio e da autorização da operadora.<br/>'
+                     '• <b>Excedentes:</b> Tempo de sala, permanência e materiais não previstos '
+                     'serão submetidos às regras de cobertura e faturamento aplicáveis.<br/>'
+                     '• <b>Intercorrências:</b> Reoperações e complicações exigem análise de cobertura '
+                     'e autorização conforme as regras assistenciais e contratuais.')
+    story.extend([p(adicionais), Spacer(1, 7), p('SERVIÇO EXCLUSIVO DE CONCIERGE ROBÓTICA', secao)])
+    concierge = ('Para proporcionar uma experiência segura, ágil e acolhedora, os pacientes de '
+                'cirurgia robótica contam com o nosso serviço exclusivo de Concierge. Estamos à '
+                'disposição para auxiliar em todas as etapas do seu procedimento. Em caso de dúvidas, '
+                'entre em contato diretamente pelo WhatsApp: <b>+55 48 9181-5582</b> ou pelo e-mail '
+                '<b>concierge@unimedflorianopolis.com.br</b>')
+    qr_celula = [create_qr_code(), Spacer(1, 1), p('Aponte a câmera<br/>para o WhatsApp', pequeno)]
+    tb_con = Table([[p(concierge), qr_celula]], colWidths=[15.2*cm, 3.6*cm])
+    tb_con.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,-1),colors.HexColor('#ECFDF5')),
+                                ('BOX',(0,0),(-1,-1),.5,GREEN),('PADDING',(0,0),(-1,-1),3.8),
+                                ('VALIGN',(0,0),(-1,-1),'MIDDLE'),('ALIGN',(1,0),(1,0),'CENTER')]))
+    story.extend([tb_con, Spacer(1, 8)])
+    mini = Table([[p(f'<b>ORÇAMENTO Nº {seguro("numero_orcamento")}</b>', cel_v),
+                   p(f'<b>VÁLIDO ATÉ {seguro("data_validade")}</b>', cel_b)]],
+                 colWidths=[4.2*cm, 4.2*cm])
+    mini.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,-1),colors.HexColor('#F3F4F6')),
+                              ('BOX',(0,0),(-1,-1),.5,BORDER),('PADDING',(0,0),(-1,-1),2.8)]))
+    assinatura = Table([[mini, p(f'<para align="right">São José, {seguro("data_solicitacao")}<br/><br/>'
+                                '________________________________________<br/><b>Responsável Paciente</b></para>')]],
+                       colWidths=[9.4*cm, 9.4*cm])
+    assinatura.setStyle(TableStyle([('VALIGN',(0,0),(-1,-1),'BOTTOM'),
+                                    ('PADDING',(0,0),(-1,-1),0)]))
+    story.append(assinatura)
 
-  tag_obj = create_tag(tag_label, is_particular=is_particular)
+    class OrcamentoCanvas(NumberedCanvas):
+        orc_number = str(dados['numero_orcamento'])
 
-  story.append(Paragraph("Orçamento cirúrgico", title_style))
-  story.append(Paragraph("ATENDIMENTO PARTICULAR · PACOTE · CIRURGIA ROBÓTICA", subtitle_style))
+    doc.build(story, canvasmaker=OrcamentoCanvas)
+    resultado = buffer.getvalue()
+    buffer.close()
+    return resultado
 
-  info_data = [
-      [Paragraph(f"<b>PACIENTE</b><br/>{dados['paciente']}", normal_text), Paragraph(f"<b>MÉDICO RESPONSÁVEL</b><br/>{dados['medico']}", normal_text)],
-      [Paragraph(f"<b>DATA DA SOLICITAÇÃO</b><br/>{dados['data_solicitacao']}", normal_text), Paragraph(f"<b>VALIDADE DO ORÇAMENTO</b><br/>{dados['data_validade']} · 30 dias", normal_text)],
-      [Paragraph(f"<b>TEMPO PREVISTO DE CIRURGIA</b><br/>{dados['tempo_cc']}", normal_text), Paragraph(f"<b>ACOMODAÇÃO</b><br/>{dados['acomodacao']}", normal_text)],
-      [[Paragraph("<b>TIPO DE ORÇAMENTO</b>", normal_text), Spacer(1, 1), tag_obj], Paragraph(f"<b>CONVÊNIO / MODALIDADE</b><br/>{convenio_label}", normal_text)],
-  ]
-
-  info_table = Table(info_data, colWidths=[9.4 * cm, 9.4 * cm])
-  info_table.setStyle(TableStyle([
-      ("BACKGROUND", (0, 0), (-1, -1), light_bg),
-      ("BOX", (0, 0), (-1, -1), 0.5, border_gray),
-      ("INNERGRID", (0, 0), (-1, -1), 0.4, border_gray),
-      ("PADDING", (0, 0), (-1, -1), 3.5),
-      ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-  ]))
-  story.append(info_table)
-  story.append(Spacer(1, 7.0))
-
-  story.append(Paragraph("PROCEDIMENTOS PREVISTOS", section_heading))
-  proc_data = [
-      [Paragraph("Código", table_header), Paragraph("Procedimento", table_header)],
-      [Paragraph("89999901", table_cell), Paragraph("Taxa de procedimento robótico " + ("particular" if is_particular else "híbrido"), table_cell)],
-  ]
-  proc_table = Table(proc_data, colWidths=[2.8 * cm, 16.0 * cm])
-  proc_table.setStyle(TableStyle([
-      ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#F3F4F6")),
-      ("BOX", (0, 0), (-1, -1), 0.5, border_gray),
-      ("INNERGRID", (0, 0), (-1, -1), 0.4, border_gray),
-      ("PADDING", (0, 0), (-1, -1), 3.0),
-  ]))
-  story.append(proc_table)
-  story.append(Spacer(1, 7.0))
-
-  story.append(Paragraph("VALORES DE RESPONSABILIDADE DO PACIENTE", section_heading))
-  v_hosp = dados["valor_hospital"]
-  v_anest = dados["valor_anestesia"]
-  v_mat = dados["valor_materiais"]
-  v_total = v_hosp + v_anest + v_mat
-
-  val_data = [
-      [Paragraph("Descrição", table_header), Paragraph("Valor", table_header)],
-      [Paragraph("Taxa de Procedimento (Hospital)", table_cell), Paragraph(fmt_m(v_hosp), table_cell)],
-      [Paragraph("Honorários Anestésicos", table_cell), Paragraph(fmt_m(v_anest), table_cell)],
-      [Paragraph("Pinças e Materiais Robóticos", table_cell), Paragraph(fmt_m(v_mat), table_cell)],
-      [Paragraph("Refeição Paciente e Acompanhante*", table_cell), Paragraph("Cortesia", table_cell_green)],
-      [Paragraph("Subtotal", table_cell_bold), Paragraph(fmt_m(v_total), table_cell_bold)],
-      [Paragraph("Desconto", table_cell), Paragraph("R$ 0,00", table_cell)],
-      [Paragraph("Total a pagar pelo paciente", ParagraphStyle("THB", parent=table_header, fontSize=6.8)), Paragraph(fmt_m(v_total), ParagraphStyle("TVB", parent=table_cell_bold, fontSize=7.5, textColor=unimed_green))],
-  ]
-  val_table = Table(val_data, colWidths=[14.0 * cm, 4.8 * cm])
-  val_table.setStyle(TableStyle([
-      ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#F3F4F6")),
-      ("BOX", (0, 0), (-1, -1), 0.5, border_gray),
-      ("INNERGRID", (0, 0), (-1, -1), 0.4, border_gray),
-      ("PADDING", (0, 0), (-1, -1), 3.0),
-      ("BACKGROUND", (0, -1), (-1, -1), colors.HexColor("#ECFDF5")),
-  ]))
-  story.append(val_table)
-  story.append(Spacer(1, 8.0))
-
-  story.append(Paragraph("01 - ITENS NÃO INCLUSOS NESTE ORÇAMENTO", section_heading))
-  if is_particular:
-    no_inc_text = (
-        "• <b>Honorários Médicos da Equipe Cirúrgica (Modalidade Particular):</b> Os honorários da equipe cirúrgica não possuem cobertura deste orçamento hospitalar e deverão ser acertados e pagos pelo paciente diretamente à equipe cirúrgica. <i>(Nota: Os honorários anestésicos já estão devidamente inclusos neste orçamento).</i><br/>"
-        "• Exames laboratoriais e de imagem/diagnóstico;<br/>• Sessões de fonoaudiologia e fisioterapia;<br/>• Sangue e hemoderivados."
-    )
-  else:
-    no_inc_text = (
-        "• <b>Honorários Médicos da Equipe Cirúrgica (Modalidade Híbrida):</b> O plano de saúde cobrirá a parcela do honorário médico correspondente ao procedimento na modalidade convencional. A diferença relativa ao ato cirúrgico robótico não possui cobertura do plano e deverá ser negociada e paga pelo paciente diretamente à equipe cirúrgica. <i>(Nota: Os honorários anestésicos já estão devidamente inclusos neste orçamento).</i><br/>"
-        "• Exames laboratoriais e de imagem/diagnóstico;<br/>• Sessões de fonoaudiologia e fisioterapia;<br/>• Sangue e hemoderivados."
-    )
-
-  no_inc_box = Table([[Paragraph(no_inc_text, normal_text)]], colWidths=[18.8 * cm])
-  no_inc_box.setStyle(TableStyle([
-      ("BACKGROUND", (0, 0), (-1, -1), red_box_bg),
-      ("BOX", (0, 0), (-1, -1), 0.5, red_box_border),
-      ("PADDING", (0, 0), (-1, -1), 3.5),
-  ]))
-  story.append(no_inc_box)
-  story.append(Spacer(1, 7.0))
-
-  story.append(Paragraph("02 - CONDIÇÕES DE PAGAMENTO", section_heading))
-  notice_text = "<b>Atenção:</b> A confirmação do agendamento somente se dará mediante o pagamento antecipado em até 48h úteis à realização do procedimento."
-  notice_box = Table([[Paragraph(notice_text, normal_text)]], colWidths=[18.8 * cm])
-  notice_box.setStyle(TableStyle([
-      ("BACKGROUND", (0, 0), (-1, -1), yellow_box_bg),
-      ("BOX", (0, 0), (-1, -1), 0.5, yellow_box_border),
-      ("PADDING", (0, 0), (-1, -1), 3.2),
-  ]))
-  story.append(notice_box)
-  story.append(Spacer(1, 7.0))
-
-  pag_data = [
-      [
-          Paragraph("<b>PAGAMENTO À VISTA</b><br/>Dinheiro em espécie, cartão de débito ou PIX.<br/><b>Chave PIX (CNPJ):</b> 77.858.611/0014-14<br/><b>Favorecido:</b> Unimed Grande Florianópolis Cooperativa de Trabalho Médico", normal_text),
-          Paragraph("<b>TRANSFERÊNCIA BANCÁRIA</b><br/><b>Favorecido:</b> Unimed Grande Florianópolis Cooperativa de Trabalho Médico<br/><b>CNPJ:</b> 77.858.611/0014-14<br/><b>Banco Unicred (136)</b> | <b>Agência:</b> 1214-9 | <b>Conta:</b> 102646-1", normal_text),
-      ],
-      [
-          Paragraph("<b>CARTÃO DE CRÉDITO</b><br/>• Até R$ 10.000,00: Parcelamento em até 6x sem juros.<br/>• Acima de R$ 10.000,00: Parcelamento em até 10x sem juros.<br/><i>Solicite o link informando nº do orçamento, bandeira e parcelas.</i><br/><b>Contato:</b> +55 48 9181-5582 | concierge@unimedflorianopolis.com.br", normal_text),
-          Paragraph("<b>ENVIO DO COMPROVANTE / LINK DE PAGAMENTO</b><br/><b>WhatsApp:</b> +55 48 9181-5582<br/><b>E-mail:</b> concierge@unimedflorianopolis.com.br", normal_text),
-      ],
-  ]
-  pag_table = Table(pag_data, colWidths=[9.4 * cm, 9.4 * cm])
-  pag_table.setStyle(TableStyle([
-      ("BACKGROUND", (0, 0), (-1, -1), light_bg),
-      ("BOX", (0, 0), (-1, -1), 0.5, border_gray),
-      ("INNERGRID", (0, 0), (-1, -1), 0.4, border_gray),
-      ("PADDING", (0, 0), (-1, -1), 3.5),
-      ("VALIGN", (0, 0), (-1, -1), "TOP"),
-  ]))
-  story.append(pag_table)
-  story.append(Spacer(1, 7.0))
-
-  story.append(Paragraph("03 - INFORMAÇÕES ADICIONAIS SOBRE O ORÇAMENTO", section_heading))
-  info_add = (
-      "• <b>Adicionais:</b> Demais materiais, medicamentos, gases medicinais e OPME's (órteses, próteses e materiais especiais) que não compõem o orçamento, serão acrescentados ao valor final quando utilizados.<br/>"
-      "• <b>Variações e Excedentes:</b> Os valores contidos nesta previsão de gastos não são absolutos. Caso haja utilização de tempo excedente de sala cirúrgica ou período de permanência hospitalar superior ao estipulado, ocorrerão alterações de valores.<br/>"
-      "• <b>Reoperações, Complicações e Intercorrências:</b> Em casos de reoperações, complicações, intercorrências ou diárias além das previstas, os valores extras serão cobrados posteriormente no momento da alta.<br/>"
-      "• <b>Devoluções de OPME:</b> Em casos de necessidade de devolução de valores referentes a OPME não utilizado durante a cirurgia, o processo será concluído em até 10 dias úteis após a alta do paciente."
-  )
-  story.append(Paragraph(info_add, normal_text))
-  story.append(Spacer(1, 7.0))
-
-  story.append(Paragraph("SERVIÇO EXCLUSIVO DE CONCIERGE ROBÓTICA", section_heading))
-  concierge_text = (
-      "Para proporcionar uma experiência segura, ágil e acolhedora, os pacientes de cirurgia robótica contam com o nosso serviço exclusivo de Concierge. Estamos à disposição para auxiliar em todas as etapas do seu procedimento. Em caso de dúvidas, entre em contato diretamente pelo WhatsApp: <b>+55 48 9181-5582</b> ou pelo e-mail <b>concierge@unimedflorianopolis.com.br</b>"
-  )
-  qr_drawing = create_qr_code("https://wa.me/554891815582", size=40)
-  qr_cell = [
-      qr_drawing,
-      Spacer(1, 1),
-      Paragraph("Aponte a câmera<br/>para o WhatsApp", qr_label_style),
-  ]
-
-  concierge_table = Table([[Paragraph(concierge_text, concierge_style), qr_cell]], colWidths=[15.2 * cm, 3.6 * cm])
-  concierge_table.setStyle(TableStyle([
-      ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#ECFDF5")),
-      ("BOX", (0, 0), (-1, -1), 0.5, unimed_green),
-      ("PADDING", (0, 0), (-1, -1), 3.8),
-      ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-      ("ALIGN", (1, 0), (1, 0), "CENTER"),
-  ]))
-  story.append(concierge_table)
-  story.append(Spacer(1, 8.0))
-
-  dt_str = dados["data_solicitacao"]
-  orc_n = dados["numero_orcamento"]
-  val_d = dados["data_validade"]
-
-  signature_data = [[
-      Table(
-          [[
-              Paragraph(f"<b>ORÇAMENTO Nº {orc_n}</b>", ParagraphStyle("V1", parent=normal_bold, textColor=unimed_green, fontSize=7.0)),
-              Paragraph(f"<b>VÁLIDO ATÉ {val_d}</b>", ParagraphStyle("V2", parent=normal_bold, textColor=dark_gray, fontSize=7.0)),
-          ]],
-          colWidths=[4.2 * cm, 4.2 * cm],
-          style=[
-              ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#F3F4F6")),
-              ("BOX", (0, 0), (-1, -1), 0.5, border_gray),
-              ("ALIGN", (0, 0), (0, 0), "LEFT"),
-              ("ALIGN", (1, 0), (1, 0), "RIGHT"),
-              ("PADDING", (0, 0), (-1, -1), 2.8),
-          ],
-      ),
-      Paragraph(f"<para align='right'>São José, {dt_str}<br/><br/>________________________________________<br/><b>Responsável Paciente</b></para>", normal_text),
-  ]]
-  signature_table = Table(signature_data, colWidths=[9.4 * cm, 9.4 * cm])
-  signature_table.setStyle(TableStyle([
-      ("VALIGN", (0, 0), (-1, -1), "BOTTOM"),
-      ("PADDING", (0, 0), (-1, -1), 0),
-  ]))
-  story.append(signature_table)
-
-  class CustomNumberedCanvas(NumberedCanvas):
-    orc_number = str(dados["numero_orcamento"])
-
-  doc.build(story, canvasmaker=CustomNumberedCanvas)
-  pdf_value = buffer.getvalue()
-  buffer.close()
-  return pdf_value
-
-
-# --- PARSER NATIVO HOSPITALAR (CONTINGÊNCIA DIRETA SEM DEPENDER DA REDE) ---
-def parse_moeda(val_str):
-  clean = re.sub(r"[^\d,\.]", "", val_str).strip()
-  if not clean:
-    return 0.0
-  if "," in clean and "." in clean:
-    clean = clean.replace(".", "").replace(",", ".")
-  elif "," in clean:
-    clean = clean.replace(",", ".")
-  elif "." in clean:
-    parts = clean.split(".")
-    if len(parts) > 2:
-      clean = "".join(parts[:-1]) + "." + parts[-1]
-  try:
-    return float(clean)
-  except:
-    return 0.0
 
 def extrair_dados_direto_tasy(texto):
-  dados = {
-      "paciente": "PACIENTE",
-      "medico": "MÉDICO RESPONSÁVEL",
-      "numero_orcamento": "000000",
-      "tipo_orcamento": "HÍBRIDO",
-      "data_solicitacao": datetime.now().strftime("%d/%m/%Y"),
-      "data_validade": "",
-      "tempo_cc": "180 Min CC",
-      "acomodacao": "Apartamento",
-      "valor_hospital": 0.0,
-      "valor_anestesia": 0.0,
-      "valor_materiais": 0.0
-  }
-
-  m_pac = re.search(r"PACIENTE\s*[:\n]\s*([^\n\r]+)", texto, re.IGNORECASE)
-  if m_pac:
-    dados["paciente"] = m_pac.group(1).strip()
-
-  m_med = re.search(r"M[ÉE]DICO\s+RESPONS[ÁA]VEL\s*[:\n]\s*([^\n\r]+)", texto, re.IGNORECASE)
-  if m_med:
-    dados["medico"] = m_med.group(1).strip()
-
-  m_data = re.search(r"DATA\s+(?:DA\s+)?SOLICITA[ÇC][ÃA]O\s*[:\n]\s*(\d{2}/\d{2}/\d{4})", texto, re.IGNORECASE)
-  if m_data:
-    dados["data_solicitacao"] = m_data.group(1).strip()
-
-  try:
-    dt_sol = datetime.strptime(dados["data_solicitacao"], "%d/%m/%Y")
-    dados["data_validade"] = (dt_sol + timedelta(days=30)).strftime("%d/%m/%Y")
-  except:
-    dados["data_validade"] = (datetime.now() + timedelta(days=30)).strftime("%d/%m/%Y")
-
-  m_tempo = re.search(r"TEMPO\s+PREVISTO[^\n\r:]*[:\n]\s*([^\n\r]+)", texto, re.IGNORECASE)
-  if m_tempo:
-    dados["tempo_cc"] = m_tempo.group(1).strip()
-
-  m_acom = re.search(r"ACOMODA[ÇC][ÃA]O\s*[:\n]\s*([^\n\r]+)", texto, re.IGNORECASE)
-  if m_acom:
-    dados["acomodacao"] = m_acom.group(1).strip()
-
-  m_tipo = re.search(r"TIPO\s+DE\s+OR[ÇC]AMENTO\s*[:\n]\s*([^\n\r]+)", texto, re.IGNORECASE)
-  if m_tipo:
-    t_val = m_tipo.group(1).strip().upper()
-    dados["tipo_orcamento"] = "PARTICULAR" if "PARTICULAR" in t_val else "HÍBRIDO"
-  elif "PARTICULAR" in texto.upper() and ("HÍBRIDO" not in texto.upper() and "HIBRIDO" not in texto.upper()):
-    dados["tipo_orcamento"] = "PARTICULAR"
-  else:
-    dados["tipo_orcamento"] = "HÍBRIDO"
-
-  m_orc = re.search(r"OR[ÇC]AMENTO\s+(?:N[º°O\.]*|NUMERO)\s*[:\n]?\s*(\d+)", texto, re.IGNORECASE)
-  if m_orc:
-    dados["numero_orcamento"] = m_orc.group(1).strip()
-
-  m_hosp = re.search(r"Taxa\s+de\s+Procedimento[^\n\r\d]*[\|\s:R\$]*([\d\.,]+)", texto, re.IGNORECASE)
-  if m_hosp:
-    dados["valor_hospital"] = parse_moeda(m_hosp.group(1))
-
-  m_anes = re.search(r"Honor[áa]rios\s+Anest[ée]sicos[^\n\r\d]*[\|\s:R\$]*([\d\.,]+)", texto, re.IGNORECASE)
-  if m_anes:
-    dados["valor_anestesia"] = parse_moeda(m_anes.group(1))
-
-  m_mat = re.search(r"Pin[çc]as\s+e\s+Materiais\s+Rob[óo]ticos[^\n\r\d]*[\|\s:R\$]*([\d\.,]+)", texto, re.IGNORECASE)
-  if m_mat:
-    dados["valor_materiais"] = parse_moeda(m_mat.group(1))
-
-  return dados
+    dados = dict(paciente='PACIENTE', medico='MÉDICO RESPONSÁVEL', numero_orcamento='',
+                 tipo_orcamento='HÍBRIDO', data_solicitacao=datetime.now().strftime('%d/%m/%Y'),
+                 tempo_cc='180 Min CC', acomodacao='Apartamento', valor_hospital=0.0,
+                 valor_anestesia=0.0, valor_materiais=0.0)
+    padroes = {
+        'paciente': r'PACIENTE\s*[:\n]\s*([^\n\r]+)',
+        'medico': r'M[ÉE]DICO\s+RESPONS[ÁA]VEL\s*[:\n]\s*([^\n\r]+)',
+        'numero_orcamento': r'OR[ÇC]AMENTO\s+(?:N[º°O.]*|N[ÚU]MERO)\s*[:\n]?\s*(\d+)',
+        'data_solicitacao': r'DATA\s+(?:DA\s+)?SOLICITA[ÇC][ÃA]O\s*[:\n]\s*(\d{2}/\d{2}/\d{4})',
+        'tempo_cc': r'TEMPO\s+PREVISTO[^\n\r:]*[:\n]\s*([^\n\r]+)',
+        'acomodacao': r'ACOMODA[ÇC][ÃA]O\s*[:\n]\s*([^\n\r]+)',
+        'tipo_orcamento': r'TIPO\s+DE\s+OR[ÇC]AMENTO\s*[:\n]\s*([^\n\r]+)',
+        'valor_hospital': r'Taxa\s+de\s+Procedimento[^\n\r\d]*[\|\s:R$]*([\d.,]+)',
+        'valor_anestesia': r'Honor[áa]rios\s+Anest[ée]sicos[^\n\r\d]*[\|\s:R$]*([\d.,]+)',
+        'valor_materiais': r'Pin[çc]as\s+e\s+Materiais\s+Rob[óo]ticos[^\n\r\d]*[\|\s:R$]*([\d.,]+)',
+    }
+    for campo, padrao in padroes.items():
+        achado = re.search(padrao, texto, re.IGNORECASE)
+        if achado:
+            valor = achado.group(1).strip()
+            if campo.startswith('valor_'):
+                valor = parse_moeda(valor)
+            elif campo == 'tipo_orcamento':
+                valor = normalizar_modalidade(valor)
+            dados[campo] = valor
+    if not re.search(padroes['tipo_orcamento'], texto, re.IGNORECASE):
+        # A seleção manual na interface prevalecerá sobre este palpite.
+        if '100% CONVÊNIO' in texto.upper() or '100% CONVENIO' in texto.upper():
+            dados['tipo_orcamento'] = '100% CONVÊNIO'
+        elif 'PARTICULAR' in texto.upper() and not re.search(r'H[ÍI]BRIDO', texto, re.IGNORECASE):
+            dados['tipo_orcamento'] = 'PARTICULAR'
+    return dados
 
 
-# --- MOTOR DE EXTRAÇÃO INTELIGENTE (COM FAIL-SAFE RESILIENTE) ---
-def extrair_dados_tasy(texto_ou_pdf, api_key):
-  chave_limpa = str(api_key).strip().strip('"\'').replace(" ", "")
-  
-  if chave_limpa:
-    try:
-      client = genai.Client(api_key=chave_limpa)
-      prompt = """
-        Você é um extrator especialista de orçamentos hospitalares do TASY.
-        Analise o documento e retorne ESTRITAMENTE um JSON com as seguintes chaves:
-        {
-          "paciente": "Nome completo do paciente",
-          "medico": "Nome do médico responsável (incluindo Dr. e CRM se houver)",
-          "numero_orcamento": "Número do orçamento",
-          "tipo_orcamento": "HÍBRIDO ou PARTICULAR (identifique se é pacote híbrido ou 100% particular)",
-          "data_solicitacao": "Data da solicitação no formato DD/MM/AAAA",
-          "tempo_cc": "Tempo de centro cirúrgico ex: '180 Min CC'",
-          "acomodacao": "Tipo de acomodação (ex: Apartamento)",
-          "valor_hospital": 0.00 (float da taxa hospitalar),
-          "valor_anestesia": 0.00 (float da taxa/honorário anestésico),
-          "valor_materiais": 0.00 (float da soma de todas as pinças/materiais/drapes robóticos)
-        }
-        Retorne APENAS o JSON puro.
-        """
-
-      response = client.models.generate_content(
-          model="gemini-3.8-flash",
-          contents=[prompt, texto_ou_pdf],
-          config=types.GenerateContentConfig(response_mime_type="application/json"),
-      )
-      
-      if response and hasattr(response, "text") and response.text:
-        data = json.loads(response.text)
+def extrair_dados_tasy(texto, api_key):
+    chave = str(api_key or '').strip().strip('"\'').replace(' ', '')
+    if chave:
         try:
-          dt_sol = datetime.strptime(data["data_solicitacao"], "%d/%m/%Y")
-        except:
-          dt_sol = datetime.now()
-          data["data_solicitacao"] = dt_sol.strftime("%d/%m/%Y")
-        data["data_validade"] = (dt_sol + timedelta(days=30)).strftime("%d/%m/%Y")
-        return data, "AI"
-    except Exception as e:
-      # Se a IA estiver com erro 503, 429 ou cota cheia, o fluxo não para
-      pass
-
-  # CONTINGÊNCIA ATIVADA: Extração nativa com parsing de texto direto do Tasy
-  dados = extrair_dados_direto_tasy(texto_ou_pdf)
-  return dados, "Nativo"
-
-
-# --- INTERFACE PRINCIPAL DO STREAMLIT ---
-if os.path.exists("unimed_logo_official.png"):
-  st.image("unimed_logo_official.png", width=220)
-
-st.title("Gerador e Gestor de Orçamentos de Cirurgia Robótica")
-st.caption("Hospital Unimed Grande Florianópolis · Programa de Cirurgia Robótica")
-
-tab1, tab2 = st.tabs(["📄 Gerar Orçamento", "📊 Painel de Acompanhamento e Conversão"])
-
-# --- ABA 1: GERAR ORÇAMENTO ---
-with tab1:
-  st.markdown("---")
-  
-  try:
-    api_key = str(st.secrets["GEMINI_API_KEY"]).strip().strip('"\'').replace(" ", "")
-  except Exception:
-    api_key = ""
-
-  uploaded_file = st.file_uploader("📄 Envie o PDF do Orçamento Padrão do TASY:", type=["pdf"])
-
-  if uploaded_file:
-    if st.button("🚀 Processar e Gerar Orçamento Oficial", type="primary"):
-      with st.spinner("Processando orçamento e atualizando histórico..."):
-        try:
-          reader = pypdf.PdfReader(uploaded_file)
-          texto_tasy = ""
-          for page in reader.pages:
-            texto_tasy += page.extract_text() + "\n"
-
-          dados, motor = extrair_dados_tasy(texto_tasy, api_key)
-          v_tot = dados["valor_hospital"] + dados["valor_anestesia"] + dados["valor_materiais"]
-
-          # Grava automaticamente no histórico
-          salvar_orcamento_db(dados, v_tot)
-
-          st.success("Orçamento processado com sucesso!")
-          st.subheader("📋 Resumo dos Dados Processados")
-
-          col1, col2 = st.columns(2)
-          with col1:
-            st.write(f"**Paciente:** {dados['paciente']}")
-            st.write(f"**Médico:** {dados['medico']}")
-            st.write(f"**Orçamento Nº:** {dados['numero_orcamento']}")
-            st.write(f"**Acomodação:** {dados['acomodacao']}")
-          with col2:
-            st.write(f"**Data Solicitação:** {dados['data_solicitacao']}")
-            st.write(f"**Validade (30 dias):** :green[**{dados['data_validade']}**]")
-            st.write(f"**Tempo CC:** {dados['tempo_cc']}")
-            st.write(f"**Tipo:** {dados.get('tipo_orcamento', 'HÍBRIDO')}")
-
-          st.markdown(f"### **Valor Total Paciente:** :green[{fmt_m(v_tot)}]")
-
-          pdf_bytes = gerar_pdf_bytes(dados)
-
-          st.download_button(
-              label="📥 Baixar Orçamento Oficial em PDF",
-              data=pdf_bytes,
-              file_name=f"Orcamento_{dados['numero_orcamento']}_{dados['paciente'].replace(' ', '_')}.pdf",
-              mime="application/pdf",
-          )
-
-        except Exception as e:
-          st.error(f"Erro ao processar orçamento: {str(e)}")
-
-# --- ABA 2: PAINEL DE ACOMPANHAMENTO ---
-with tab2:
-  st.subheader("📊 Painel de Controle e Histórico de Conversão")
-  
-  df = carregar_orcamentos_df()
-
-  if df.empty:
-    st.info("Nenhum orçamento foi gerado até o momento. Ao gerar propostas na Aba 1, elas aparecerão aqui automaticamente!")
-  else:
-    total_emitidos = len(df)
-    convertidos = len(df[df["status"] == "Convertido / Fechado"])
-    pendentes = len(df[df["status"] == "Pendente"])
-    taxa_conversao = (convertidos / total_emitidos * 100) if total_emitidos > 0 else 0.0
-
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Total de Orçamentos", total_emitidos)
-    m2.metric("Convertidos / Fechados", convertidos)
-    m3.metric("Pendentes", pendentes)
-    m4.metric("Taxa de Conversão", f"{taxa_conversao:.1f}%")
-
-    st.markdown("---")
-
-    st.subheader("🔔 Gestão de Alertas (48 Horas)")
-    
-    agora = datetime.now()
-    pendentes_48h = []
-
-    for _, row in df.iterrows():
-      if row["status"] == "Pendente":
-        try:
-          dt_cria = datetime.strptime(row["created_at"], "%Y-%m-%d %H:%M:%S")
-          if agora - dt_cria >= timedelta(hours=48):
-            pendentes_48h.append({
-                "numero_orcamento": row["numero_orcamento"],
-                "paciente": row["paciente"],
-                "medico": row["medico"],
-                "tipo_orcamento": row["tipo_orcamento"],
-                "data_solicitacao": row["data_solicitacao"],
-                "valor_total": row["valor_total"]
-            })
+            cliente = genai.Client(api_key=chave)
+            prompt = '''Você é um extrator de orçamentos hospitalares do TASY.
+            Retorne SOMENTE JSON com campos: paciente, medico, numero_orcamento,
+            tipo_orcamento (HÍBRIDO, PARTICULAR ou 100% CONVÊNIO), data_solicitacao
+            (DD/MM/AAAA), tempo_cc, acomodacao, valor_hospital, valor_anestesia,
+            valor_materiais. Os três valores devem ser números. Não invente dados.
+            Para tipo_orcamento, se não estiver explícito, retorne HÍBRIDO.
+            '''
+            resposta = cliente.models.generate_content(
+                model=st.secrets.get('GEMINI_MODEL', 'gemini-2.5-flash'),
+                contents=[prompt, texto],
+                config=types.GenerateContentConfig(response_mime_type='application/json'))
+            extraidos = json.loads(resposta.text)
+            base = extrair_dados_direto_tasy(texto)
+            for chave_campo in base:
+                if extraidos.get(chave_campo) is not None and str(extraidos[chave_campo]).strip():
+                    base[chave_campo] = extraidos[chave_campo]
+            for campo in ('valor_hospital', 'valor_anestesia', 'valor_materiais'):
+                base[campo] = parse_moeda(base[campo])
+            base['tipo_orcamento'] = normalizar_modalidade(base['tipo_orcamento'])
+            return base, 'IA'
         except Exception:
-          pass
+            pass
+    return extrair_dados_direto_tasy(texto), 'Nativo'
 
-    if pendentes_48h:
-      st.warning(f"⚠️ Existem **{len(pendentes_48h)} orçamento(s)** emitido(s) há mais de 48 horas e ainda pendente(s)!")
-      if st.button("📧 Enviar Alerta de 48h por E-mail para Comercial & Particular"):
-        sucesso, msg_retorno = enviar_email_alerta(pendentes_48h)
-        if sucesso:
-          st.success(msg_retorno)
-        else:
-          st.error(msg_retorno)
+
+def formatar_validade(data_str):
+    try:
+        return (datetime.strptime(data_str, '%d/%m/%Y') + timedelta(days=30)).strftime('%d/%m/%Y')
+    except ValueError:
+        return ''
+
+
+init_db()
+if os.path.exists('unimed_logo_official.png'):
+    st.image('unimed_logo_official.png', width=220)
+st.title('Gerador e Gestor de Orçamentos de Cirurgia Robótica')
+st.caption('Hospital Unimed Grande Florianópolis · Programa de Cirurgia Robótica')
+tab1, tab2 = st.tabs(['📄 Gerar Orçamento', '📊 Painel de Acompanhamento e Conversão'])
+
+with tab1:
+    st.markdown('---')
+    try:
+        api_key = str(st.secrets.get('GEMINI_API_KEY', '')).strip().strip('"\'')
+    except Exception:
+        api_key = ''
+    arquivo = st.file_uploader('📄 Envie o PDF do Orçamento Padrão do TASY:', type=['pdf'])
+    if arquivo is not None:
+        arquivo_bytes = arquivo.getvalue()
+        import hashlib
+        hash_arquivo = hashlib.sha256(arquivo_bytes).hexdigest()
+        if st.session_state.get('hash_orcamento') != hash_arquivo:
+            st.session_state['hash_orcamento'] = hash_arquivo
+            st.session_state.pop('dados_orcamento', None)
+            st.session_state.pop('pdf_final', None)
+        if st.button('🚀 Processar e Gerar Orçamento Oficial', type='primary'):
+            with st.spinner('Lendo o orçamento original...'):
+                try:
+                    leitor = pypdf.PdfReader(io.BytesIO(arquivo_bytes))
+                    texto_tasy = '\n'.join(pagina.extract_text() or '' for pagina in leitor.pages)
+                    if not texto_tasy.strip():
+                        st.error('PDF sem texto selecionável. Envie o PDF original exportado do TASY.')
+                    else:
+                        dados, motor = extrair_dados_tasy(texto_tasy, api_key)
+                        dados['data_validade'] = formatar_validade(str(dados['data_solicitacao']))
+                        st.session_state['dados_orcamento'] = dados
+                        st.session_state.pop('pdf_final', None)
+                        st.success(f'Dados extraídos pelo motor {motor}. Confira e edite antes de gerar.')
+                except Exception as erro:
+                    st.error(f'Erro ao processar orçamento: {erro}')
+
+    if 'dados_orcamento' in st.session_state and arquivo is not None:
+        d = st.session_state['dados_orcamento']
+        st.subheader('📋 Resumo dos Dados Processados — Edição e Conferência')
+        st.info('Todos os campos podem ser corrigidos. A modalidade escolhida aqui prevalece sobre a identificada no PDF.')
+        with st.form('form_revisao_orcamento'):
+            c1, c2 = st.columns(2)
+            with c1:
+                paciente = st.text_input('Paciente', value=str(d['paciente']))
+                medico = st.text_input('Médico responsável / solicitante', value=str(d['medico']))
+                numero = st.text_input('Número do orçamento', value=str(d['numero_orcamento']))
+                acomodacao = st.text_input('Acomodação', value=str(d['acomodacao']))
+                data_sol = st.text_input('Data da solicitação (DD/MM/AAAA)', value=str(d['data_solicitacao']))
+            with c2:
+                tipo = st.selectbox('Modelo do orçamento', MODALIDADES,
+                                    index=MODALIDADES.index(normalizar_modalidade(d['tipo_orcamento'])))
+                tempo = st.text_input('Tempo previsto de cirurgia', value=str(d['tempo_cc']))
+                data_val = st.text_input('Validade do orçamento (DD/MM/AAAA)',
+                                         value=str(d.get('data_validade', '')))
+                hosp = st.number_input('Taxa de Procedimento (Hospital) — R$', min_value=0.0,
+                                       value=max(0.0, parse_moeda(d['valor_hospital'])), step=100.0, format='%.2f')
+                anest = st.number_input('Honorários Anestésicos — R$', min_value=0.0,
+                                        value=max(0.0, parse_moeda(d['valor_anestesia'])), step=100.0, format='%.2f')
+                mat = st.number_input('Pinças e Materiais Robóticos — R$', min_value=0.0,
+                                      value=max(0.0, parse_moeda(d['valor_materiais'])), step=100.0, format='%.2f')
+            if tipo == '100% CONVÊNIO':
+                st.caption('100% convênio: os valores editados acima não serão cobrados do paciente nem exibidos como pagamento particular.')
+            else:
+                st.caption('Os valores acima serão apresentados como responsabilidade financeira do paciente.')
+            confirmar = st.form_submit_button('✅ Confirmar dados e gerar PDF oficial', type='primary')
+        if confirmar:
+            try:
+                datetime.strptime(data_sol, '%d/%m/%Y')
+                datetime.strptime(data_val, '%d/%m/%Y')
+                if not numero.strip() or not paciente.strip() or not medico.strip():
+                    raise ValueError('Informe número do orçamento, paciente e médico responsável.')
+                atualizados = dict(numero_orcamento=numero.strip(), paciente=paciente.strip(),
+                                   medico=medico.strip(), tipo_orcamento=tipo,
+                                   data_solicitacao=data_sol, data_validade=data_val,
+                                   tempo_cc=tempo.strip(), acomodacao=acomodacao.strip(),
+                                   valor_hospital=float(hosp), valor_anestesia=float(anest),
+                                   valor_materiais=float(mat))
+                pdf = gerar_pdf_bytes(atualizados)
+                if len(pypdf.PdfReader(io.BytesIO(pdf)).pages) != 1:
+                    raise ValueError('O conteúdo excedeu uma página A4. Reduza campos muito extensos.')
+                salvar_orcamento_db(atualizados, valor_paciente(atualizados))
+                st.session_state['dados_orcamento'] = atualizados
+                st.session_state['pdf_final'] = pdf
+                st.session_state['nome_pdf'] = (f'Orcamento_{numero.strip()}_'
+                    f'{re.sub(r"[^\w-]", "_", paciente.strip())}.pdf')
+                st.success('Orçamento gerado e salvo no histórico com os dados confirmados.')
+            except Exception as erro:
+                st.error(f'Não foi possível gerar o orçamento: {erro}')
+        if st.session_state.get('pdf_final'):
+            atual = st.session_state['dados_orcamento']
+            st.write(f"**Modalidade:** {atual['tipo_orcamento']}")
+            st.markdown(f"### **Valor total do paciente:** :green[{fmt_m(valor_paciente(atual))}]")
+            st.download_button('📥 Baixar Orçamento Oficial em PDF',
+                               data=st.session_state['pdf_final'],
+                               file_name=st.session_state['nome_pdf'], mime='application/pdf')
+
+with tab2:
+    st.subheader('📊 Painel de Controle e Histórico de Conversão')
+    df = carregar_orcamentos_df()
+    if df.empty:
+        st.info('Nenhum orçamento foi gerado até o momento. Ao gerar propostas, elas aparecerão aqui.')
     else:
-      st.success("✅ Nenhum orçamento pendente com mais de 48 horas de emissão.")
-
-    st.markdown("---")
-    st.subheader("📋 Tabela Interativa de Acompanhamento")
-    st.caption("Altere o status de cada orçamento na caixa de seleção abaixo:")
-
-    for idx, row in df.iterrows():
-      with st.expander(f"📌 Orçamento Nº {row['numero_orcamento']} - {row['paciente']} | Status Atual: {row['status']}"):
-        c1, c2, c3 = st.columns([2, 2, 2])
-        with c1:
-          st.write(f"**Médico:** {row['medico']}")
-          st.write(f"**Modalidade:** {row['tipo_orcamento']}")
-        with c2:
-          st.write(f"**Data Solicitação:** {row['data_solicitacao']}")
-          st.write(f"**Valor Total:** R$ {row['valor_total']:,.2f}")
-        with c3:
-          opcoes_status = ["Pendente", "Convertido / Fechado", "Não Convertido / Cancelado"]
-          idx_atual = opcoes_status.index(row["status"]) if row["status"] in opcoes_status else 0
-          
-          novo_st = st.selectbox(
-              f"Alterar Status ({row['numero_orcamento']}):",
-              opcoes_status,
-              index=idx_atual,
-              key=f"status_{row['numero_orcamento']}"
-          )
-          
-          if novo_st != row["status"]:
-            atualizar_status_db(row["numero_orcamento"], novo_st)
-            st.success(f"Status do Orçamento {row['numero_orcamento']} atualizado para '{novo_st}'!")
-            st.rerun()
+        total = len(df)
+        convertidos = len(df[df['status'] == 'Convertido / Fechado'])
+        pendentes = len(df[df['status'] == 'Pendente'])
+        cols = st.columns(4)
+        cols[0].metric('Total de Orçamentos', total)
+        cols[1].metric('Convertidos / Fechados', convertidos)
+        cols[2].metric('Pendentes', pendentes)
+        cols[3].metric('Taxa de Conversão', f'{convertidos/total*100:.1f}%')
+        st.markdown('---')
+        st.subheader('🔔 Gestão de Alertas (48 Horas)')
+        pendentes_48h = []
+        for _, linha in df.iterrows():
+            if linha['status'] != 'Pendente':
+                continue
+            try:
+                criado = datetime.strptime(str(linha['created_at']), '%Y-%m-%d %H:%M:%S')
+                if datetime.now() - criado >= timedelta(hours=48):
+                    pendentes_48h.append(linha.to_dict())
+            except (ValueError, TypeError):
+                continue
+        if pendentes_48h:
+            st.warning(f'Existem {len(pendentes_48h)} orçamento(s) há mais de 48 horas ainda pendente(s)!')
+            if st.button('📧 Enviar Alerta de 48h por E-mail para Comercial & Particular'):
+                sucesso, mensagem = enviar_email_alerta(pendentes_48h)
+                (st.success if sucesso else st.error)(mensagem)
+        else:
+            st.success('✅ Nenhum orçamento pendente com mais de 48 horas de emissão.')
+        st.markdown('---')
+        st.subheader('📋 Tabela Interativa de Acompanhamento')
+        st.caption('Altere o status de cada orçamento na caixa de seleção abaixo:')
+        for _, linha in df.iterrows():
+            with st.expander(f"📌 Orçamento Nº {linha['numero_orcamento']} - {linha['paciente']} | Status Atual: {linha['status']}"):
+                c1, c2, c3 = st.columns(3)
+                with c1:
+                    st.write(f"**Médico:** {linha['medico']}")
+                    st.write(f"**Modalidade:** {linha['tipo_orcamento']}")
+                with c2:
+                    st.write(f"**Data Solicitação:** {linha['data_solicitacao']}")
+                    st.write(f"**Valor Total:** {fmt_m(linha['valor_total'])}")
+                with c3:
+                    opcoes = ['Pendente', 'Convertido / Fechado', 'Não Convertido / Cancelado']
+                    indice = opcoes.index(linha['status']) if linha['status'] in opcoes else 0
+                    novo = st.selectbox(f"Alterar Status ({linha['numero_orcamento']}):",
+                                        opcoes, index=indice, key=f"status_{linha['numero_orcamento']}")
+                    if novo != linha['status']:
+                        atualizar_status_db(linha['numero_orcamento'], novo)
+                        st.success(f"Status atualizado para '{novo}'!")
+                        st.rerun()
