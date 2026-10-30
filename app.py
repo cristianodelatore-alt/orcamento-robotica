@@ -361,8 +361,8 @@ def gerar_pdf_bytes(dados):
              p('<b>TRANSFERÊNCIA BANCÁRIA</b><br/><b>Favorecido:</b> Unimed Grande Florianópolis '
                'Cooperativa de Trabalho Médico<br/><b>CNPJ:</b> 77.858.611/0014-14<br/>'
                '<b>Banco Unicred (136)</b> | <b>Agência:</b> 1214-9 | <b>Conta:</b> 102646-1')],
-            [p('<b>CARTÃO DE CRÉDITO</b><br/>• Até R$ 10.000,00: Parcelamento em até 6x sem juros.'
-               '<br/>• Acima de R$ 10.000,00: Parcelamento em até 10x sem juros.<br/>'
+            [p('<b>CARTÃO DE CRÉDITO</b><br/>• Até R$ 10.000,00: Parcelamento em até 10x sem juros.'
+               '<br/>• Acima de R$ 10.000,00: Parcelamento em até 12x sem juros.<br/>'
                '<i>Solicite o link informando nº do orçamento, bandeira e parcelas.</i><br/>'
                '<b>Contato:</b> +55 48 9181-5582 | concierge@unimedflorianopolis.com.br'),
              p('<b>ENVIO DO COMPROVANTE / LINK DE PAGAMENTO</b><br/><b>WhatsApp:</b> '
